@@ -1,9 +1,11 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { redirect } from "next/navigation";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { ensureAllHoldouts } from "@/lib/holdouts";
 import { regenerateTriviaBank } from "@/lib/trivia/regenerate";
+import { shuffle, partition } from "@/lib/utils";
 
 /**
  * Add a member to an existing group at any time (including after others have
@@ -102,6 +104,68 @@ export async function setCaptain(input: { groupId: string; memberId: string }) {
   await supabase.from("teams").update({ captain_member_id: input.memberId }).eq("id", m.team_id);
 
   revalidatePath(`/dashboard/g/${input.groupId}`);
+}
+
+/** Rename a group. */
+export async function renameGroup(formData: FormData) {
+  const groupId = String(formData.get("groupId") || "");
+  const name = String(formData.get("name") || "").trim();
+  if (!groupId || !name) return;
+  const supabase = await createSupabaseServerClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return;
+  await supabase.from("groups").update({ name }).eq("id", groupId);
+  revalidatePath(`/dashboard/g/${groupId}`);
+  revalidatePath("/dashboard");
+}
+
+/** Permanently delete a group and everything under it (cascades). */
+export async function deleteGroup(formData: FormData) {
+  const groupId = String(formData.get("groupId") || "");
+  if (!groupId) return;
+  const supabase = await createSupabaseServerClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return;
+  await supabase.from("groups").delete().eq("id", groupId);
+  revalidatePath("/dashboard");
+  redirect("/dashboard");
+}
+
+/** Randomly redraw team rosters across the existing teams and pick fresh
+ *  captains. Handy for re-balancing any time before the game. */
+export async function reshuffleTeams(formData: FormData) {
+  const groupId = String(formData.get("groupId") || "");
+  if (!groupId) return;
+  const supabase = await createSupabaseServerClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return;
+
+  const [{ data: teams }, { data: members }] = await Promise.all([
+    supabase.from("teams").select("id").eq("group_id", groupId).order("team_index"),
+    supabase.from("members").select("id").eq("group_id", groupId),
+  ]);
+  if (!teams || teams.length === 0 || !members || members.length === 0) return;
+
+  // Clear captains, then randomly partition members across the teams.
+  await supabase.from("teams").update({ captain_member_id: null }).eq("group_id", groupId);
+  const buckets = partition(shuffle(members), teams.length);
+  for (let i = 0; i < buckets.length; i++) {
+    const teamId = teams[i].id;
+    const ids = buckets[i].map((m) => m.id);
+    if (ids.length === 0) continue;
+    await supabase.from("members").update({ team_id: teamId, is_captain: false }).in("id", ids);
+    // New captain for this team.
+    const captainId = ids[Math.floor(Math.random() * ids.length)];
+    await supabase.from("members").update({ is_captain: true }).eq("id", captainId);
+    await supabase.from("teams").update({ captain_member_id: captainId }).eq("id", teamId);
+  }
+  revalidatePath(`/dashboard/g/${groupId}`);
 }
 
 /** (Re)generate the trivia bank (balanced + calibrated; AI-tailored with a key,

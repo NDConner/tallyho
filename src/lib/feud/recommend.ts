@@ -50,6 +50,20 @@ const OPEN_TEXT = [
   "What's the most '{group}' thing imaginable?",
 ];
 
+// "Whose answer?" — everyone gives a personal answer; live, the answer is shown
+// and the team guesses who said it. Prompts must make sense answered about
+// YOURSELF (first person), since each member answers for themselves.
+const GUESS_WHO = [
+  "Your all-time favorite music artist?",
+  "Your favorite athlete of all time?",
+  "Your go-to karaoke song?",
+  "Your most-used emoji?",
+  "A movie you can rewatch forever?",
+  "Your dream vacation spot?",
+  "Your comfort food?",
+  "A hidden talent of yours?",
+];
+
 /**
  * Deterministic, member-aware recommendations — no API key required. The AI
  * recommender (server-side, optional) can replace these; this is the fallback.
@@ -78,6 +92,10 @@ export function recommendFeudQuestions(opts: {
       type: "open_text",
       prompt: t.replace("{name}", nextName()).replace("{group}", opts.groupName),
     });
+  }
+  // A couple of "whose answer?" prompts for variety.
+  for (const p of shuffle(GUESS_WHO).slice(0, 3)) {
+    out.push({ type: "guess_who", prompt: p });
   }
 
   // Interleave so the set isn't all pick-person up front, then trim to count.

@@ -12,6 +12,11 @@
 // Setting trivia point value = avg top-bucket size makes one round's feud
 // potential ≈ its trivia potential. Uniform point values also guarantee the
 // two teams carry equal total trivia value per round.
+//
+// The two targeted kinds (guess_who / guess_what) are ALL-OR-NOTHING and worth
+// exactly this same calibration constant: a correct targeted guess earns what a
+// solid feud answer or a right trivia question does, and a miss earns zero. That
+// keeps every question type comparable on the scoreboard.
 // ============================================================================
 
 export function averageTopBucket(topBucketCounts: number[]): number {

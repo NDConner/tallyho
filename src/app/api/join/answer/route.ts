@@ -12,11 +12,15 @@ export async function POST(req: Request) {
   const supabase = createSupabaseAdminClient();
   const { data: q } = await supabase
     .from("feud_questions")
-    .select("id, group_id")
+    .select("id, group_id, type, target_member_id")
     .eq("id", questionId)
     .maybeSingle();
   if (!q || q.group_id !== ctx.group.id) {
     return NextResponse.json({ ok: false }, { status: 400 });
+  }
+  // guess_what is answered only by its hand-picked target.
+  if (q.type === "guess_what" && q.target_member_id !== memberId) {
+    return NextResponse.json({ ok: false, error: "not_target" }, { status: 403 });
   }
 
   // Don't let a member answer the question they're held out of.

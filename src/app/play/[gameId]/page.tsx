@@ -15,7 +15,11 @@ export default async function PlayPage({ params }: { params: Promise<{ gameId: s
   if (!game) redirect("/dashboard");
   const groupId = game.group_id as string;
 
-  const { data: group } = await supabase.from("groups").select("name").eq("id", groupId).single();
+  const { data: group } = await supabase
+    .from("groups")
+    .select("name, calibration_constant")
+    .eq("id", groupId)
+    .single();
 
   const state = (game.state ?? {}) as { queue?: GameTurn[]; cursor?: number };
   const queue = state.queue ?? [];
@@ -64,10 +68,17 @@ export default async function PlayPage({ params }: { params: Promise<{ gameId: s
   for (const t of teams ?? []) initialScores[t.id] = 0;
   for (const s of scoreRows ?? []) initialScores[s.team_id] = s.points;
 
+  // All-or-nothing value for guess_who / guess_what = the group's calibration
+  // constant (same as a trivia question). Fall back to the trivia point value.
+  const constant = Number(group?.calibration_constant ?? 0);
+  const allOrNothingValue =
+    constant >= 2 ? Math.round(constant) : (trivia ?? [])[0]?.point_value ?? 3;
+
   const payload: LiveGamePayload = {
     groupId,
     gameId,
     groupName: group?.name ?? "The group",
+    allOrNothingValue,
     settings:
       (game.settings as { feudSeconds: number; triviaSeconds: number }) ?? {
         feudSeconds: 25,

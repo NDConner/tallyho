@@ -15,11 +15,12 @@ export default async function QuestionsPage({ params }: { params: Promise<{ id: 
   const { data: group } = await supabase.from("groups").select("id, name").eq("id", id).single();
   if (!group) notFound();
 
-  const [{ data: qData }, { count: memberCount }] = await Promise.all([
+  const [{ data: qData }, { data: memberData }] = await Promise.all([
     supabase.from("feud_questions").select("*").eq("group_id", id).order("created_at"),
-    supabase.from("members").select("id", { count: "exact", head: true }).eq("group_id", id),
+    supabase.from("members").select("id, display_name").eq("group_id", id).order("created_at"),
   ]);
   const qs = (qData ?? []) as FeudQuestion[];
+  const members = (memberData ?? []).map((m) => ({ id: m.id, name: m.display_name }));
 
   const counts = new Map<string, number>();
   const ids = qs.map((q) => q.id);
@@ -36,6 +37,7 @@ export default async function QuestionsPage({ params }: { params: Promise<{ id: 
     prompt: q.prompt,
     type: q.type,
     options: q.options,
+    target_member_id: q.target_member_id,
     source: q.source,
     ai_recommended: q.ai_recommended,
     responseCount: counts.get(q.id) ?? 0,
@@ -52,7 +54,12 @@ export default async function QuestionsPage({ params }: { params: Promise<{ id: 
         toward pick-a-person and multiple-choice for clean tallies. Each player will be held out of
         exactly one of these to play live.
       </p>
-      <QuestionManager groupId={id} questions={questions} memberCount={memberCount ?? 0} />
+      <QuestionManager
+        groupId={id}
+        questions={questions}
+        members={members}
+        memberCount={members.length}
+      />
     </div>
   );
 }

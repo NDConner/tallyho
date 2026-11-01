@@ -6,7 +6,8 @@ import {
   addQuestion,
   updateQuestion,
   deleteQuestion,
-  addRecommended,
+  suggestNewList,
+  suggestMore,
 } from "@/app/dashboard/g/[id]/questions/actions";
 import type { FeudQuestionType } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -16,16 +17,35 @@ export interface QItem {
   prompt: string;
   type: FeudQuestionType;
   options: string[] | null;
+  target_member_id: string | null;
   source: string;
   ai_recommended: boolean;
   responseCount: number;
 }
 
-const TYPE_META: Record<FeudQuestionType, { label: string; hint: string; hasOptions: boolean }> = {
+interface MemberLite {
+  id: string;
+  name: string;
+}
+
+const TYPE_META: Record<
+  FeudQuestionType,
+  { label: string; hint: string; hasOptions: boolean }
+> = {
   pick_person: { label: "Pick a person", hint: "Answers are group members — cleanest tally.", hasOptions: false },
   multiple_choice: { label: "Multiple choice", hint: "Give 2–6 options.", hasOptions: true },
   likelihood: { label: "Likelihood", hint: "A scale, e.g. Never → Always.", hasOptions: true },
   open_text: { label: "Open text", hint: "Free text, clustered into buckets.", hasOptions: false },
+  guess_who: {
+    label: "Whose answer?",
+    hint: "Everyone answers about themselves. All-or-nothing.",
+    hasOptions: false,
+  },
+  guess_what: {
+    label: "Guess their answer",
+    hint: "Only the person you pick answers. All-or-nothing.",
+    hasOptions: false,
+  },
 };
 const DEFAULT_SCALE = ["Never", "Sometimes", "Usually", "Always"];
 const TYPE_BADGE: Record<FeudQuestionType, string> = {
@@ -33,15 +53,28 @@ const TYPE_BADGE: Record<FeudQuestionType, string> = {
   multiple_choice: "bg-cyan/15 text-cyan border-cyan/30",
   likelihood: "bg-gold/15 text-gold border-gold/30",
   open_text: "bg-green/15 text-green border-green/30",
+  guess_who: "bg-cyan/15 text-cyan border-cyan/30",
+  guess_what: "bg-magenta/15 text-magenta-soft border-magenta/30",
 };
+
+// Plain-language "how it plays live" note for the two targeted kinds.
+function playsNote(type: FeudQuestionType): string | null {
+  if (type === "guess_who")
+    return "🎯 Everyone answers this about themselves. Live, one answer is shown and the team guesses WHO said it — all or nothing.";
+  if (type === "guess_what")
+    return "🎯 Only the chosen person answers. Live, the team guesses WHAT they said — all or nothing.";
+  return null;
+}
 
 export function QuestionManager({
   groupId,
   questions,
+  members,
   memberCount,
 }: {
   groupId: string;
   questions: QItem[];
+  members: MemberLite[];
   memberCount: number;
 }) {
   const router = useRouter();
@@ -49,8 +82,17 @@ export function QuestionManager({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const target = Math.ceil(memberCount * 1.5) + 3;
+  const nameById = new Map(members.map((m) => [m.id, m.name]));
 
-  function save(data: { prompt: string; type: FeudQuestionType; options: string[] | null }, id?: string) {
+  function save(
+    data: {
+      prompt: string;
+      type: FeudQuestionType;
+      options: string[] | null;
+      targetMemberId: string | null;
+    },
+    id?: string,
+  ) {
     start(async () => {
       if (id) await updateQuestion({ groupId, questionId: id, ...data });
       else await addQuestion({ groupId, ...data });
@@ -62,6 +104,14 @@ export function QuestionManager({
   function remove(id: string) {
     start(async () => {
       await deleteQuestion({ groupId, questionId: id });
+      router.refresh();
+    });
+  }
+  function runAction(action: (fd: FormData) => Promise<void>) {
+    start(async () => {
+      const fd = new FormData();
+      fd.set("groupId", groupId);
+      await action(fd);
       router.refresh();
     });
   }
@@ -78,14 +128,31 @@ export function QuestionManager({
             everyone can get a fresh question they didn&apos;t answer.
           </p>
         </div>
-        <div className="flex gap-2">
-          <form action={addRecommended}>
-            <input type="hidden" name="groupId" value={groupId} />
-            <button type="submit" className="btn btn-secondary text-sm" disabled={pending}>
-              ✨ Suggest questions
-            </button>
-          </form>
-          <button onClick={() => { setAdding(true); setEditingId(null); }} className="btn btn-primary text-sm">
+        <div className="flex flex-wrap gap-2">
+          <button
+            onClick={() => {
+              if (
+                questions.length === 0 ||
+                confirm("Replace ALL current questions with a fresh suggested list?")
+              )
+                runAction(suggestNewList);
+            }}
+            className="btn btn-ghost text-sm"
+            disabled={pending}
+          >
+            ✨ Suggest a new list
+          </button>
+          <button
+            onClick={() => runAction(suggestMore)}
+            className="btn btn-secondary text-sm"
+            disabled={pending}
+          >
+            ➕ Add 10 more
+          </button>
+          <button
+            onClick={() => { setAdding(true); setEditingId(null); }}
+            className="btn btn-primary text-sm"
+          >
             + Add question
           </button>
         </div>
@@ -93,6 +160,7 @@ export function QuestionManager({
 
       {adding && (
         <QuestionForm
+          members={members}
           pending={pending}
           onSave={(d) => save(d)}
           onCancel={() => setAdding(false)}
@@ -111,6 +179,7 @@ export function QuestionManager({
             <QuestionForm
               key={q.id}
               initial={q}
+              members={members}
               pending={pending}
               onSave={(d) => save(d, q.id)}
               onCancel={() => setEditingId(null)}
@@ -122,6 +191,11 @@ export function QuestionManager({
                   <span className={cn("rounded-full border px-2 py-0.5 text-xs font-semibold", TYPE_BADGE[q.type])}>
                     {TYPE_META[q.type].label}
                   </span>
+                  {q.type === "guess_what" && (
+                    <span className="chip cursor-default text-xs">
+                      👤 {nameById.get(q.target_member_id ?? "") ?? "pick someone"} answers
+                    </span>
+                  )}
                   {q.ai_recommended && <span className="chip cursor-default text-xs">AI</span>}
                   {q.responseCount > 0 && (
                     <span className="text-xs text-cream/45">{q.responseCount} answered</span>
@@ -136,6 +210,9 @@ export function QuestionManager({
                       </span>
                     ))}
                   </div>
+                )}
+                {playsNote(q.type) && (
+                  <p className="mt-2 text-xs text-cream/45">{playsNote(q.type)}</p>
                 )}
               </div>
               <div className="flex shrink-0 gap-1">
@@ -156,18 +233,26 @@ export function QuestionManager({
 
 function QuestionForm({
   initial,
+  members,
   onSave,
   onCancel,
   pending,
 }: {
   initial?: QItem;
-  onSave: (d: { prompt: string; type: FeudQuestionType; options: string[] | null }) => void;
+  members: MemberLite[];
+  onSave: (d: {
+    prompt: string;
+    type: FeudQuestionType;
+    options: string[] | null;
+    targetMemberId: string | null;
+  }) => void;
   onCancel: () => void;
   pending: boolean;
 }) {
   const [prompt, setPrompt] = useState(initial?.prompt ?? "");
   const [type, setType] = useState<FeudQuestionType>(initial?.type ?? "pick_person");
   const [options, setOptions] = useState<string[]>(initial?.options ?? []);
+  const [targetMemberId, setTargetMemberId] = useState<string | null>(initial?.target_member_id ?? null);
   const meta = TYPE_META[type];
 
   function changeType(t: FeudQuestionType) {
@@ -175,9 +260,20 @@ function QuestionForm({
     if (t === "likelihood") setOptions((o) => (o.length ? o : [...DEFAULT_SCALE]));
     else if (t === "multiple_choice") setOptions((o) => (o.length ? o : ["", "", "", ""]));
     else setOptions([]);
+    if (t !== "guess_what") setTargetMemberId(null);
   }
 
-  const canSave = prompt.trim().length > 0 && (!meta.hasOptions || options.filter((o) => o.trim()).length >= 2);
+  const canSave =
+    prompt.trim().length > 0 &&
+    (!meta.hasOptions || options.filter((o) => o.trim()).length >= 2) &&
+    (type !== "guess_what" || Boolean(targetMemberId));
+
+  const promptPlaceholder =
+    type === "guess_who"
+      ? "e.g. Your all-time favorite music artist?"
+      : type === "guess_what"
+        ? "e.g. FMK: Ryan Gosling, Pedro Pascal, Timothée Chalamet"
+        : "Who in the group is most likely to…?";
 
   return (
     <div className="card space-y-3 border border-magenta/30 p-4">
@@ -186,7 +282,7 @@ function QuestionForm({
         className="input min-h-[64px] resize-y"
         value={prompt}
         onChange={(e) => setPrompt(e.target.value)}
-        placeholder="Who in the group is most likely to…?"
+        placeholder={promptPlaceholder}
         maxLength={200}
       />
       <div>
@@ -210,6 +306,35 @@ function QuestionForm({
         </div>
         <p className="mt-1.5 text-xs text-cream/45">{meta.hint}</p>
       </div>
+
+      {/* How-it-plays explainer for the targeted kinds */}
+      {(type === "guess_who" || type === "guess_what") && (
+        <div className="rounded-xl border border-cyan/25 bg-cyan/10 p-3 text-xs text-cyan">
+          {playsNote(type)}
+        </div>
+      )}
+
+      {/* guess_what: who is the single person that answers */}
+      {type === "guess_what" && (
+        <div>
+          <div className="label mb-1">Who answers this?</div>
+          <select
+            className="input"
+            value={targetMemberId ?? ""}
+            onChange={(e) => setTargetMemberId(e.target.value || null)}
+          >
+            <option value="">Pick a person…</option>
+            {members.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.name}
+              </option>
+            ))}
+          </select>
+          {members.length === 0 && (
+            <p className="mt-1 text-xs text-magenta-soft">Add players first, then pick who answers.</p>
+          )}
+        </div>
+      )}
 
       {meta.hasOptions && (
         <div className="space-y-2">
@@ -240,7 +365,14 @@ function QuestionForm({
           Cancel
         </button>
         <button
-          onClick={() => onSave({ prompt, type, options: meta.hasOptions ? options : null })}
+          onClick={() =>
+            onSave({
+              prompt,
+              type,
+              options: meta.hasOptions ? options : null,
+              targetMemberId: type === "guess_what" ? targetMemberId : null,
+            })
+          }
           disabled={!canSave || pending}
           className="btn btn-primary text-sm"
         >

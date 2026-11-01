@@ -8,6 +8,8 @@ import { cn } from "@/lib/utils";
 import {
   scoreFeud,
   scoreTrivia,
+  scoreGuessWho,
+  scoreGuessWhat,
   persistTurn,
   setGameStatus,
   setGameTimers,
@@ -16,6 +18,7 @@ import {
   type GameTurn,
   type FeudResult,
   type TriviaResult,
+  type GuessResult,
 } from "@/app/play/actions";
 
 interface FeudQ {
@@ -39,6 +42,7 @@ export interface LiveGamePayload {
   groupId: string;
   gameId: string;
   groupName: string;
+  allOrNothingValue: number;
   settings: { feudSeconds: number; triviaSeconds: number };
   teams: TeamLite[];
   initialScores: Record<string, number>;
@@ -70,6 +74,7 @@ export function LiveGame(p: LiveGamePayload) {
   const [guess, setGuess] = useState("");
   const [answer, setAnswer] = useState("");
   const [feudRes, setFeudRes] = useState<FeudResult | null>(null);
+  const [guessRes, setGuessRes] = useState<GuessResult | null>(null);
   const [triviaRes, setTriviaRes] = useState<TriviaResult | null>(null);
   const [usedTrivia, setUsedTrivia] = useState<Set<string>>(new Set());
   const [currentTrivia, setCurrentTrivia] = useState<TriviaQ | null>(null);
@@ -82,7 +87,7 @@ export function LiveGame(p: LiveGamePayload) {
   // --- timer ---------------------------------------------------------------
   const onTimeoutRef = useRef<() => void>(() => {});
   onTimeoutRef.current = () => {
-    if (phase === "feud") submitFeud();
+    if (phase === "feud") submitSurvey();
     else if (phase === "trivia") submitTrivia();
   };
   useEffect(() => {
@@ -104,24 +109,49 @@ export function LiveGame(p: LiveGamePayload) {
   function startFeud() {
     setGuess("");
     setFeudRes(null);
+    setGuessRes(null);
     setTimeLeft(feudSeconds);
     setPhase("feud");
   }
 
-  async function submitFeud() {
+  async function submitSurvey() {
     if (pending || phase !== "feud" || !turn) return;
     setPending(true);
     setPhase("feudReveal");
     try {
-      const res = await scoreFeud({
-        gameId: p.gameId,
-        questionId: turn.feudQuestionId,
-        teamId: turn.teamId,
-        guess,
-      });
-      setFeudRes(res);
-      if (res.points > 0)
-        setScores((s) => ({ ...s, [turn.teamId]: (s[turn.teamId] ?? 0) + res.points }));
+      if (turn.kind === "guess_who") {
+        const res = await scoreGuessWho({
+          gameId: p.gameId,
+          questionId: turn.feudQuestionId,
+          answerMemberId: turn.answerMemberId ?? "",
+          teamId: turn.teamId,
+          guess,
+        });
+        setGuessRes(res);
+        if (res.points > 0)
+          setScores((s) => ({ ...s, [turn.teamId]: (s[turn.teamId] ?? 0) + res.points }));
+      } else if (turn.kind === "guess_what") {
+        const res = await scoreGuessWhat({
+          gameId: p.gameId,
+          questionId: turn.feudQuestionId,
+          targetMemberId: turn.targetMemberId ?? "",
+          teamId: turn.teamId,
+          guess,
+        });
+        setGuessRes(res);
+        if (res.points > 0)
+          setScores((s) => ({ ...s, [turn.teamId]: (s[turn.teamId] ?? 0) + res.points }));
+      } else {
+        const res = await scoreFeud({
+          gameId: p.gameId,
+          questionId: turn.feudQuestionId,
+          teamId: turn.teamId,
+          guess,
+        });
+        setFeudRes(res);
+        if (res.points > 0)
+          setScores((s) => ({ ...s, [turn.teamId]: (s[turn.teamId] ?? 0) + res.points }));
+      }
     } finally {
       setPending(false);
     }
@@ -176,6 +206,7 @@ export function LiveGame(p: LiveGamePayload) {
     setCursor(next);
     setCurrentTrivia(null);
     setFeudRes(null);
+    setGuessRes(null);
     setTriviaRes(null);
     setPhase("intro");
   }
@@ -206,6 +237,16 @@ export function LiveGame(p: LiveGamePayload) {
     const target = makeCorrect ? currentTrivia.point_value : 0;
     const delta = target - triviaRes.points;
     setTriviaRes({ ...triviaRes, correct: makeCorrect, points: target });
+    setScores((s) => ({ ...s, [turn.teamId]: Math.max(0, (s[turn.teamId] ?? 0) + delta) }));
+    await adjustScore({ gameId: p.gameId, teamId: turn.teamId, delta });
+  }
+
+  // All-or-nothing override for guess_who / guess_what reveals.
+  async function overrideGuess(makeCorrect: boolean) {
+    if (!turn || !guessRes) return;
+    const target = makeCorrect ? p.allOrNothingValue : 0;
+    const delta = target - guessRes.points;
+    setGuessRes({ ...guessRes, correct: makeCorrect, points: target });
     setScores((s) => ({ ...s, [turn.teamId]: Math.max(0, (s[turn.teamId] ?? 0) + delta) }));
     await adjustScore({ gameId: p.gameId, teamId: turn.teamId, delta });
   }
@@ -286,49 +327,107 @@ export function LiveGame(p: LiveGamePayload) {
         {/* INTRO */}
         {phase === "intro" && turn && (
           <div className="text-center">
-            <div className="label">{turn.teamName} · feud turn</div>
+            <div className="label">
+              {turn.teamName} ·{" "}
+              {turn.kind === "guess_who"
+                ? "whose answer?"
+                : turn.kind === "guess_what"
+                  ? "guess their answer"
+                  : "feud turn"}
+            </div>
             <h2 className="mt-2 font-display text-5xl font-black">
               <span className={TEAM_ACCENT[accentIdx]}>{turn.memberName}</span> is up!
             </h2>
             <p className="mt-3 text-cream/60">
-              Guess what the group said. {feudSeconds}s on the clock.
+              {turn.kind === "guess_who"
+                ? "An answer's about to show — name who gave it."
+                : turn.kind === "guess_what"
+                  ? `Guess what ${turn.targetName} answered.`
+                  : "Guess what the group said."}{" "}
+              {feudSeconds}s on the clock.
             </p>
             <button onClick={startFeud} className="btn btn-primary mt-8 text-lg">
-              Start feud question →
+              {turn.kind === "feud" ? "Start feud question →" : "Reveal & guess →"}
             </button>
           </div>
         )}
 
-        {/* FEUD */}
+        {/* SURVEY (feud / guess_who / guess_what) */}
         {phase === "feud" && turn && (
           <div className="w-full max-w-2xl text-center">
             <TimerRing seconds={timeLeft} total={feudSeconds} />
-            <h2 className="mt-6 font-display text-3xl font-bold leading-snug">
-              {p.feudQuestions[turn.feudQuestionId]?.prompt ?? "…"}
-            </h2>
-            {renderOptions(p.feudQuestions[turn.feudQuestionId])}
+
+            {turn.kind === "guess_who" ? (
+              <>
+                <div className="mt-6 text-sm text-cream/50">
+                  Someone answered “{p.feudQuestions[turn.feudQuestionId]?.prompt ?? "…"}”
+                </div>
+                <div className="mt-2 font-display text-4xl font-black text-gold">
+                  “{turn.revealAnswer}”
+                </div>
+                <p className="mt-3 text-lg text-cream/70">Who said it?</p>
+                <div className="chip mt-3 inline-flex">🎯 {p.allOrNothingValue} pts · all or nothing</div>
+              </>
+            ) : turn.kind === "guess_what" ? (
+              <>
+                <div className="mt-6 text-sm text-cream/50">
+                  {turn.targetName}&apos;s answer to:
+                </div>
+                <h2 className="mt-1 font-display text-3xl font-bold leading-snug">
+                  {p.feudQuestions[turn.feudQuestionId]?.prompt ?? "…"}
+                </h2>
+                <p className="mt-3 text-lg text-cream/70">
+                  What did {turn.targetName} say?
+                </p>
+                <div className="chip mt-3 inline-flex">🎯 {p.allOrNothingValue} pts · all or nothing</div>
+              </>
+            ) : (
+              <>
+                <h2 className="mt-6 font-display text-3xl font-bold leading-snug">
+                  {p.feudQuestions[turn.feudQuestionId]?.prompt ?? "…"}
+                </h2>
+                {renderOptions(p.feudQuestions[turn.feudQuestionId])}
+              </>
+            )}
+
             <input
               autoFocus
               className="input mt-6 text-center text-xl"
               value={guess}
               onChange={(e) => setGuess(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && submitFeud()}
-              placeholder={`${turn.memberName}, type your guess…`}
+              onKeyDown={(e) => e.key === "Enter" && submitSurvey()}
+              placeholder={
+                turn.kind === "guess_who"
+                  ? "Name who said it…"
+                  : turn.kind === "guess_what"
+                    ? `Guess ${turn.targetName}'s answer…`
+                    : `${turn.memberName}, type your guess…`
+              }
             />
-            <button onClick={submitFeud} disabled={pending} className="btn btn-primary mt-5 text-lg">
+            <button onClick={submitSurvey} disabled={pending} className="btn btn-primary mt-5 text-lg">
               Lock it in
             </button>
           </div>
         )}
 
-        {/* FEUD REVEAL */}
-        {phase === "feudReveal" && turn && (
+        {/* SURVEY REVEAL */}
+        {phase === "feudReveal" && turn && turn.kind === "feud" && (
           <FeudRevealPanel
             groupName={p.groupName}
             guess={guess}
             result={feudRes}
             pending={pending}
             onOverride={overrideFeud}
+            onContinue={continueToTrivia}
+          />
+        )}
+        {phase === "feudReveal" && turn && turn.kind !== "feud" && (
+          <GuessRevealPanel
+            kind={turn.kind}
+            guess={guess}
+            result={guessRes}
+            pending={pending}
+            onOverride={overrideGuess}
             onContinue={continueToTrivia}
           />
         )}
@@ -572,6 +671,66 @@ function FeudRevealPanel({
       <button onClick={onContinue} disabled={pending} className="btn btn-secondary mt-6 text-lg">
         On to trivia →
       </button>
+    </div>
+  );
+}
+
+function GuessRevealPanel({
+  kind,
+  guess,
+  result,
+  pending,
+  onOverride,
+  onContinue,
+}: {
+  kind: string;
+  guess: string;
+  result: GuessResult | null;
+  pending: boolean;
+  onOverride: (correct: boolean) => void;
+  onContinue: () => void;
+}) {
+  if (!result) {
+    return (
+      <div className="text-center">
+        <div className="animate-pulse text-6xl">⏳</div>
+        <p className="mt-3 text-cream/60">Checking…</p>
+      </div>
+    );
+  }
+  const correct = result.correct;
+  return (
+    <div className="w-full max-w-2xl text-center">
+      <div className="text-7xl">{correct ? "✅" : "❌"}</div>
+      <h2 className={cn("mt-4 font-display text-4xl font-black", correct ? "text-green" : "text-magenta")}>
+        {correct ? "Nailed it!" : "Not quite"}
+      </h2>
+      <p className="mt-2 text-sm text-cream/55">
+        Guessed <span className="font-semibold text-cream">“{guess || "—"}”</span>
+      </p>
+      <p className="mt-1 text-cream/80">
+        {kind === "guess_who" ? "It was " : "They said "}
+        <span className="font-semibold text-gold">{result.correctLabel || "—"}</span>
+      </p>
+      <div className="mt-4 font-display text-2xl font-bold">
+        {result.points > 0 ? (
+          <span className="text-shimmer-gold">+{result.points} points</span>
+        ) : (
+          <span className="text-cream/60">+0 points</span>
+        )}
+      </div>
+      <button
+        onClick={() => onOverride(!correct)}
+        disabled={pending}
+        className="mt-3 text-xs text-cream/45 underline hover:text-cream"
+      >
+        {correct ? "Mark it wrong instead" : "Actually correct — give the points"}
+      </button>
+      <div className="mt-5">
+        <button onClick={onContinue} disabled={pending} className="btn btn-secondary text-lg">
+          On to trivia →
+        </button>
+      </div>
     </div>
   );
 }

@@ -42,7 +42,7 @@ export async function getMemberTasks(code: string, memberId: string) {
   const [{ data: questions }, { data: responses }] = await Promise.all([
     supabase
       .from("feud_questions")
-      .select("id, prompt, type, options")
+      .select("id, prompt, type, options, target_member_id")
       .eq("group_id", ctx.group.id)
       .order("created_at"),
     supabase.from("feud_responses").select("question_id, raw_answer").eq("member_id", memberId),
@@ -51,10 +51,16 @@ export async function getMemberTasks(code: string, memberId: string) {
   const answerByQ = new Map<string, string>();
   for (const r of responses ?? []) answerByQ.set(r.question_id, r.raw_answer);
 
-  // Every question except this member's holdout, with their existing answer (if
-  // any) so the fill-out UI can show/edit it and navigate freely.
+  // What THIS member fills out:
+  //  • consensus types — every one except their fresh holdout
+  //  • guess_who       — everyone answers (a personal answer for others to guess)
+  //  • guess_what      — only the hand-picked target answers
   const allForMember = (questions ?? [])
-    .filter((q) => q.id !== holdout)
+    .filter((q) => {
+      if (q.type === "guess_who") return true;
+      if (q.type === "guess_what") return q.target_member_id === memberId;
+      return q.id !== holdout; // consensus types
+    })
     .map((q) => ({
       id: q.id,
       prompt: q.prompt,

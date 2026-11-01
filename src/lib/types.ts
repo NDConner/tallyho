@@ -17,7 +17,14 @@ export type FeudQuestionType =
   | "pick_person"
   | "likelihood"
   | "multiple_choice"
-  | "open_text";
+  | "open_text"
+  | "guess_who"
+  | "guess_what";
+
+// Survey challenge kinds, as played live. "feud" covers all consensus types
+// (pick_person/likelihood/multiple_choice/open_text — guess the group's top
+// answer). The two targeted kinds are all-or-nothing.
+export type SurveyKind = "feud" | "guess_who" | "guess_what";
 export type QuestionSource = "recommended" | "admin";
 export type TopicSource = "recommended" | "custom";
 export type GameStatus = "setup" | "active" | "paused" | "done";
@@ -68,6 +75,7 @@ export interface FeudQuestion {
   prompt: string;
   type: FeudQuestionType;
   options: string[] | null;
+  target_member_id: string | null; // guess_what: the single member who answers
   source: QuestionSource;
   ai_recommended: boolean;
   is_buffer: boolean;

@@ -6,7 +6,8 @@ import { memberInvite, captainInvite, joinLink } from "@/lib/invites";
 import { InviteCard } from "@/components/InviteCard";
 import { CopyButton } from "@/components/CopyButton";
 import { RosterEditor } from "@/components/RosterEditor";
-import { addMember, generateTriviaBank } from "./actions";
+import { GroupAdmin } from "@/components/GroupAdmin";
+import { addMember, generateTriviaBank, reshuffleTeams } from "./actions";
 import { startGame } from "@/app/play/actions";
 import type { Group, Member, Team } from "@/lib/types";
 
@@ -63,10 +64,25 @@ export default async function GroupPage({
   const link = joinLink(group, appUrl());
   const hostReady = (assignCount ?? 0) > 0 && (triviaCount ?? 0) > 0;
 
-  // Per-member fill-out progress (answered vs their assigned total = all minus holdout).
-  const { data: qRows } = await supabase.from("feud_questions").select("id").eq("group_id", id);
-  const totalQuestions = (qRows ?? []).length;
-  const qIds = (qRows ?? []).map((q) => q.id);
+  // Per-member fill-out progress. What a member owes depends on type:
+  //   consensus — all of them except their one holdout
+  //   guess_who — everyone owes one each
+  //   guess_what — only the picked target owes it
+  const CONSENSUS_TYPES = ["pick_person", "likelihood", "multiple_choice", "open_text"];
+  const { data: qRows } = await supabase
+    .from("feud_questions")
+    .select("id, type, target_member_id")
+    .eq("group_id", id);
+  const allQs = qRows ?? [];
+  const totalQuestions = allQs.length;
+  const qIds = allQs.map((q) => q.id);
+  const consensusCount = allQs.filter((q) => CONSENSUS_TYPES.includes(q.type)).length;
+  const guessWhoCount = allQs.filter((q) => q.type === "guess_who").length;
+  const guessWhatByTarget = new Map<string, number>();
+  for (const q of allQs)
+    if (q.type === "guess_what" && q.target_member_id)
+      guessWhatByTarget.set(q.target_member_id, (guessWhatByTarget.get(q.target_member_id) ?? 0) + 1);
+
   const answeredByMember = new Map<string, number>();
   const holdoutMembers = new Set<string>();
   if (qIds.length) {
@@ -79,11 +95,17 @@ export default async function GroupPage({
   }
   const memberProgress = members.map((m) => {
     const answered = answeredByMember.get(m.id) ?? 0;
-    const target = Math.max(0, totalQuestions - (holdoutMembers.has(m.id) ? 1 : 0));
+    const target = Math.max(
+      0,
+      consensusCount -
+        (holdoutMembers.has(m.id) ? 1 : 0) +
+        guessWhoCount +
+        (guessWhatByTarget.get(m.id) ?? 0),
+    );
     const status =
       totalQuestions === 0
         ? "waiting"
-        : answered >= target && target > 0
+        : target === 0 || answered >= target
           ? "done"
           : answered > 0
             ? "progress"
@@ -146,6 +168,7 @@ export default async function GroupPage({
             {CATEGORY_LABELS[group.category] ?? group.category}
             {group.dynamic_note ? ` · ${group.dynamic_note}` : ""}
           </p>
+          <GroupAdmin groupId={group.id} name={group.name} />
         </div>
         <div className="flex items-center gap-3">
           <div className="text-right">
@@ -307,12 +330,23 @@ export default async function GroupPage({
 
           {/* roster by team */}
           <section className="card p-5">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <h2 className="font-display text-lg font-bold">Roster</h2>
-              <span className="text-sm text-cream/50">{members.length} players</span>
+              <div className="flex items-center gap-3">
+                <span className="text-sm text-cream/50">{members.length} players</span>
+                {teams.length > 1 && members.length > 0 && (
+                  <form action={reshuffleTeams}>
+                    <input type="hidden" name="groupId" value={group.id} />
+                    <button type="submit" className="btn btn-ghost text-xs">
+                      🔀 Reshuffle teams
+                    </button>
+                  </form>
+                )}
+              </div>
             </div>
             <p className="mt-1 text-xs text-cream/45">
-              Use the dropdown to move a player; tap ★ to make someone captain.
+              Move a player with the dropdown, tap ★ to make someone captain, or reshuffle to redraw
+              teams and captains at random.
             </p>
             <RosterEditor groupId={group.id} members={members} teams={teams} />
 

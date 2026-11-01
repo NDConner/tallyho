@@ -1,6 +1,11 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+// Only consensus-type questions ("guess the group's top answer") are held out.
+// guess_who is answered by everyone; guess_what only by its target — neither is
+// ever a holdout.
+const CONSENSUS_TYPES = ["pick_person", "likelihood", "multiple_choice", "open_text"];
+
 // The fresh-question guarantee: every member is held out of exactly one distinct
 // question — the one they'll play live — and they answer all the others. These
 // helpers take a Supabase client so both the admin (authed) and member
@@ -26,12 +31,14 @@ export async function ensureMemberHoldout(
   if (existing) return existing.question_id;
 
   const [{ data: questions }, { data: held }, { data: answered }] = await Promise.all([
-    supabase.from("feud_questions").select("id").eq("group_id", groupId).order("created_at"),
+    supabase.from("feud_questions").select("id, type").eq("group_id", groupId).order("created_at"),
     supabase.from("feud_question_assignments").select("question_id").eq("group_id", groupId),
     supabase.from("feud_responses").select("question_id").eq("member_id", memberId),
   ]);
 
-  const ids = (questions ?? []).map((q: { id: string }) => q.id);
+  const ids = (questions ?? [])
+    .filter((q: { type: string }) => CONSENSUS_TYPES.includes(q.type))
+    .map((q: { id: string }) => q.id);
   if (ids.length === 0) return null;
   const heldSet = new Set((held ?? []).map((h: { question_id: string }) => h.question_id));
   const answeredSet = new Set((answered ?? []).map((a: { question_id: string }) => a.question_id));
@@ -98,9 +105,11 @@ export async function reassignHoldoutsNewRound(
 
   const [{ data: members }, { data: questions }] = await Promise.all([
     supabase.from("members").select("id").eq("group_id", groupId).order("created_at"),
-    supabase.from("feud_questions").select("id").eq("group_id", groupId).order("created_at"),
+    supabase.from("feud_questions").select("id, type").eq("group_id", groupId).order("created_at"),
   ]);
-  const qIds = (questions ?? []).map((q: { id: string }) => q.id);
+  const qIds = (questions ?? [])
+    .filter((q: { type: string }) => CONSENSUS_TYPES.includes(q.type))
+    .map((q: { id: string }) => q.id);
   const held = new Set<string>();
 
   for (const m of members ?? []) {

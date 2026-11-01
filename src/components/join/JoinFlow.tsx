@@ -29,6 +29,18 @@ interface Tasks {
 
 type Phase = "code" | "identify" | "tasks";
 
+// Types that collect a free-text answer (vs. tapping an option/person).
+const FREE_TEXT = ["open_text", "guess_who", "guess_what"];
+
+// A one-line explainer shown under the prompt so players get how it'll play.
+function typeHint(type: string): string | null {
+  if (type === "guess_who")
+    return "🙈 Your own answer — at game night the crew guesses who said it.";
+  if (type === "guess_what")
+    return "🤫 Just you answer this. Your crew will try to guess what you said.";
+  return null;
+}
+
 export function JoinFlow({ initialCode }: { initialCode?: string }) {
   const [phase, setPhase] = useState<Phase>("code");
   const [code, setCode] = useState((initialCode ?? "").toUpperCase());
@@ -250,7 +262,7 @@ function TaskFlow({
   }
 
   function goNext() {
-    if (q?.type === "open_text" && text.trim()) saveAnswer(q.id, text);
+    if (FREE_TEXT.includes(q?.type) && text.trim()) saveAnswer(q.id, text);
     if (idx < total - 1) setIdx(idx + 1);
     else setStep(tasks.captain ? "topics" : "done");
   }
@@ -319,6 +331,9 @@ function TaskFlow({
 
       <div className="mt-4 text-xs text-cream/45">Question {idx + 1} of {total}</div>
       <h2 className="mt-1 font-display text-xl font-bold leading-snug">{q.prompt}</h2>
+      {typeHint(q.type) && (
+        <p className="mt-2 rounded-lg bg-cyan/10 px-3 py-2 text-xs text-cyan">{typeHint(q.type)}</p>
+      )}
 
       <div className="mt-4">
         {q.type === "pick_person" && (
@@ -365,6 +380,36 @@ function TaskFlow({
             placeholder="Type your answer…"
             maxLength={80}
             className="input"
+          />
+        )}
+
+        {q.type === "guess_who" && (
+          <input
+            autoFocus
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            onBlur={() => text.trim() && saveAnswer(q.id, text)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && text.trim()) {
+                saveAnswer(q.id, text);
+                goNext();
+              }
+            }}
+            placeholder="Your answer…"
+            maxLength={80}
+            className="input"
+          />
+        )}
+
+        {q.type === "guess_what" && (
+          <textarea
+            autoFocus
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            onBlur={() => text.trim() && saveAnswer(q.id, text)}
+            placeholder="Your answer… (just you — keep it a secret!)"
+            maxLength={160}
+            className="input min-h-[80px] resize-y"
           />
         )}
       </div>
