@@ -82,7 +82,7 @@ export function QuestionManager({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [guidance, setGuidance] = useState("");
-  const target = Math.ceil(memberCount * 1.5) + 3;
+  const target = Math.max(memberCount, 6);
   const nameById = new Map(members.map((m) => [m.id, m.name]));
 
   function save(
@@ -127,8 +127,9 @@ export function QuestionManager({
               {questions.length} question{questions.length === 1 ? "" : "s"}
             </div>
             <p className="text-sm text-cream/55">
-              For {memberCount} players, aim for <span className="text-cream">~{target}+</span> so
-              everyone can get a fresh question they didn&apos;t answer.
+              Every question gets played live. For {memberCount} players, aim for at least{" "}
+              <span className="text-cream">~{target}</span> (about one per player) — add more for a
+              longer game; they split evenly across the teams.
             </p>
           </div>
           <div className="flex flex-wrap gap-2">

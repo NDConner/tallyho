@@ -5,6 +5,9 @@ import { redirect } from "next/navigation";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { ensureAllHoldouts } from "@/lib/holdouts";
 import { regenerateTriviaBank } from "@/lib/trivia/regenerate";
+import { STARTER_POOL, CATEGORY_OF_TOPIC } from "@/lib/trivia/topics";
+import { TRIVIA_POINTS } from "@/lib/scoring";
+import { normalize } from "@/lib/match";
 import { shuffle, partition } from "@/lib/utils";
 
 /**
@@ -233,5 +236,210 @@ export async function renameTeam(input: { groupId: string; teamId: string; name:
   } = await supabase.auth.getUser();
   if (!user) return;
   await supabase.from("teams").update({ name }).eq("id", input.teamId).eq("group_id", input.groupId);
+  revalidatePath(`/dashboard/g/${input.groupId}`);
+}
+
+// ─── Scheduling ──────────────────────────────────────────────────────────────
+
+/** Set the game date and the deadline for everyone to finish their questions.
+ *  Values are datetime-local strings (or empty to clear). */
+export async function setSchedule(input: { groupId: string; gameDate: string; answerDeadline: string }) {
+  if (!input.groupId) return;
+  const supabase = await createSupabaseServerClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return;
+  const toIso = (v: string) => {
+    const t = (v ?? "").trim();
+    if (!t) return null;
+    const d = new Date(t);
+    return isNaN(d.getTime()) ? null : d.toISOString();
+  };
+  await supabase
+    .from("groups")
+    .update({ scheduled_time: toIso(input.gameDate), answer_deadline: toIso(input.answerDeadline) })
+    .eq("id", input.groupId);
+  revalidatePath(`/dashboard/g/${input.groupId}`);
+}
+
+// ─── Trivia categories + topics + bank editing ───────────────────────────────
+
+/** Set which categories captains pick trivia topics within (built-in + custom,
+ *  e.g. "company trivia"). Empty array resets to the built-in five. */
+export async function setTriviaCategories(input: {
+  groupId: string;
+  categories: { name: string; custom: boolean }[];
+}) {
+  if (!input.groupId) return;
+  const supabase = await createSupabaseServerClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return;
+  const clean = (input.categories ?? [])
+    .map((c) => ({ name: String(c.name ?? "").trim().slice(0, 40), custom: Boolean(c.custom) }))
+    .filter((c) => c.name);
+  await supabase
+    .from("groups")
+    .update({ trivia_categories: clean.length ? clean : null })
+    .eq("id", input.groupId);
+  revalidatePath(`/dashboard/g/${input.groupId}/trivia`);
+  revalidatePath(`/dashboard/g/${input.groupId}`);
+}
+
+/** Replace a team's selected trivia topics (host side). Each topic carries its
+ *  category (so custom categories work too). */
+export async function setTeamTopics(input: {
+  groupId: string;
+  teamId: string;
+  topics: { name: string; category: string }[];
+}) {
+  if (!input.groupId || !input.teamId) return;
+  const supabase = await createSupabaseServerClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return;
+  const rows = (input.topics ?? [])
+    .map((t) => ({ name: String(t.name ?? "").trim().slice(0, 60), category: String(t.category ?? "").trim() }))
+    .filter((t) => t.name && t.category);
+  await supabase.from("trivia_topics").delete().eq("team_id", input.teamId);
+  if (rows.length) {
+    await supabase.from("trivia_topics").insert(
+      rows.map((t) => ({
+        group_id: input.groupId,
+        team_id: input.teamId,
+        category: t.category,
+        name: t.name,
+        selected: true,
+        source: "custom",
+      })),
+    );
+  }
+  revalidatePath(`/dashboard/g/${input.groupId}/trivia`);
+  revalidatePath(`/dashboard/g/${input.groupId}`);
+}
+
+function cleanVariants(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  return v.map((x) => String(x ?? "").trim()).filter(Boolean).slice(0, 8);
+}
+
+export async function addTrivia(input: {
+  groupId: string;
+  teamId: string;
+  topic: string;
+  prompt: string;
+  correctAnswer: string;
+  variants: string[];
+}) {
+  const supabase = await createSupabaseServerClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return;
+  const prompt = input.prompt.trim();
+  const correct = input.correctAnswer.trim();
+  if (!input.groupId || !input.teamId || !prompt || !correct) return;
+  await supabase.from("trivia_questions").insert({
+    group_id: input.groupId,
+    team_id: input.teamId,
+    topic: input.topic.trim() || "General",
+    prompt,
+    correct_answer: correct,
+    accepted_variants: cleanVariants(input.variants),
+    point_value: TRIVIA_POINTS,
+    round_no: 1,
+  });
+  revalidatePath(`/dashboard/g/${input.groupId}/trivia`);
+  revalidatePath(`/dashboard/g/${input.groupId}`);
+}
+
+export async function updateTrivia(input: {
+  groupId: string;
+  questionId: string;
+  topic: string;
+  prompt: string;
+  correctAnswer: string;
+  variants: string[];
+}) {
+  const supabase = await createSupabaseServerClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return;
+  const prompt = input.prompt.trim();
+  const correct = input.correctAnswer.trim();
+  if (!prompt || !correct) return;
+  await supabase
+    .from("trivia_questions")
+    .update({
+      topic: input.topic.trim() || "General",
+      prompt,
+      correct_answer: correct,
+      accepted_variants: cleanVariants(input.variants),
+    })
+    .eq("id", input.questionId);
+  revalidatePath(`/dashboard/g/${input.groupId}/trivia`);
+  revalidatePath(`/dashboard/g/${input.groupId}`);
+}
+
+export async function deleteTrivia(input: { groupId: string; questionId: string }) {
+  const supabase = await createSupabaseServerClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return;
+  await supabase.from("trivia_questions").delete().eq("id", input.questionId);
+  revalidatePath(`/dashboard/g/${input.groupId}/trivia`);
+  revalidatePath(`/dashboard/g/${input.groupId}`);
+}
+
+/** Add N more curated questions to a team, matched to its topics/categories and
+ *  de-duped against what it already has (and flagged-too-obvious prompts). */
+export async function addMoreTrivia(input: { groupId: string; teamId: string; n: number }) {
+  const supabase = await createSupabaseServerClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return;
+  const n = Math.max(1, Math.min(20, input.n || 5));
+
+  const [{ data: topics }, { data: existing }, { data: flagged }] = await Promise.all([
+    supabase.from("trivia_topics").select("name").eq("team_id", input.teamId).eq("selected", true),
+    supabase.from("trivia_questions").select("prompt").eq("group_id", input.groupId),
+    supabase.from("trivia_feedback").select("normalized_prompt").eq("group_id", input.groupId),
+  ]);
+  const selectedTopics = new Set((topics ?? []).map((t) => t.name));
+  const selectedCats = new Set([...selectedTopics].map((t) => CATEGORY_OF_TOPIC[t]).filter(Boolean));
+  const used = new Set((existing ?? []).map((e) => normalize(e.prompt)));
+  for (const f of flagged ?? []) used.add(f.normalized_prompt);
+
+  const byTopic = shuffle(STARTER_POOL.filter((q) => selectedTopics.has(q.topic)));
+  const byCat = shuffle(STARTER_POOL.filter((q) => !selectedTopics.has(q.topic) && selectedCats.has(q.category)));
+  const picks: typeof STARTER_POOL = [];
+  for (const q of [...byTopic, ...byCat]) {
+    if (picks.length >= n) break;
+    const key = normalize(q.prompt);
+    if (used.has(key)) continue;
+    used.add(key);
+    picks.push(q);
+  }
+  if (picks.length) {
+    await supabase.from("trivia_questions").insert(
+      picks.map((q) => ({
+        group_id: input.groupId,
+        team_id: input.teamId,
+        topic: q.topic,
+        prompt: q.prompt,
+        correct_answer: q.answer,
+        accepted_variants: q.variants,
+        point_value: TRIVIA_POINTS,
+        round_no: 1,
+      })),
+    );
+  }
+  revalidatePath(`/dashboard/g/${input.groupId}/trivia`);
   revalidatePath(`/dashboard/g/${input.groupId}`);
 }

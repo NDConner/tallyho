@@ -1,7 +1,7 @@
 import { redirect } from "next/navigation";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { LiveGame, type LiveGamePayload } from "@/components/game/LiveGame";
-import { SURVEY_PLACE_POINTS, WIN_POINTS } from "@/lib/scoring";
+import { SURVEY_PLACE_POINTS, WIN_POINTS, TRIVIA_POINTS } from "@/lib/scoring";
 import type { GameTurn } from "@/app/play/actions";
 
 export default async function PlayPage({ params }: { params: Promise<{ gameId: string }> }) {
@@ -22,20 +22,23 @@ export default async function PlayPage({ params }: { params: Promise<{ gameId: s
     .eq("id", groupId)
     .single();
 
-  const state = (game.state ?? {}) as { queue?: GameTurn[]; cursor?: number };
+  const state = (game.state ?? {}) as { queue?: GameTurn[]; cursor?: number; questionsPerTeam?: number };
   const queue = state.queue ?? [];
   const cursor = state.cursor ?? 0;
 
-  const [{ data: teams }, { data: scoreRows }, { data: feudQs }, { data: trivia }] =
+  const [{ data: teams }, { data: scoreRows }, { data: feudQs }, { data: trivia }, { data: topicRows }] =
     await Promise.all([
-      supabase.from("teams").select("id, name, team_index").eq("group_id", groupId).order("team_index"),
+      supabase.from("teams").select("id, name, team_index, logo_url, emoji").eq("group_id", groupId).order("team_index"),
       supabase.from("game_scores").select("team_id, points").eq("game_id", gameId),
       supabase.from("feud_questions").select("id, prompt, type, options").eq("group_id", groupId),
       supabase
         .from("trivia_questions")
         .select("id, team_id, topic, prompt, point_value")
         .eq("group_id", groupId),
+      supabase.from("trivia_topics").select("name, category").eq("group_id", groupId),
     ]);
+  const categoryOfTopic = new Map<string, string>();
+  for (const t of topicRows ?? []) categoryOfTopic.set(t.name, t.category);
 
   const feudQuestions: Record<string, { prompt: string; type: string; options: string[] | null }> = {};
   for (const q of feudQs ?? []) {
@@ -48,12 +51,13 @@ export default async function PlayPage({ params }: { params: Promise<{ gameId: s
 
   const triviaByTeam: Record<
     string,
-    { id: string; topic: string; prompt: string; point_value: number }[]
+    { id: string; topic: string; category: string | null; prompt: string; point_value: number }[]
   > = {};
   for (const t of trivia ?? []) {
     (triviaByTeam[t.team_id] ??= []).push({
       id: t.id,
       topic: t.topic,
+      category: categoryOfTopic.get(t.topic) ?? null,
       prompt: t.prompt,
       point_value: t.point_value,
     });
@@ -69,8 +73,8 @@ export default async function PlayPage({ params }: { params: Promise<{ gameId: s
   for (const t of teams ?? []) initialScores[t.id] = 0;
   for (const s of scoreRows ?? []) initialScores[s.team_id] = s.points;
 
-  // Standard scoring: a correct all-or-nothing guess (guess_who / guess_what)
-  // and a correct trivia answer each equal a 1st-place survey answer.
+  // Standard scoring: a correct all-or-nothing guess equals a 1st-place answer;
+  // every correct trivia answer is worth TRIVIA_POINTS.
   const allOrNothingValue = WIN_POINTS;
 
   const payload: LiveGamePayload = {
@@ -78,13 +82,21 @@ export default async function PlayPage({ params }: { params: Promise<{ gameId: s
     gameId,
     groupName: group?.name ?? "The group",
     allOrNothingValue,
+    triviaPoints: TRIVIA_POINTS,
+    questionsPerTeam: state.questionsPerTeam ?? Math.max(1, Math.round(queue.length / Math.max(1, (teams ?? []).length))),
     placePoints: [...SURVEY_PLACE_POINTS],
     settings:
       (game.settings as { feudSeconds: number; triviaSeconds: number }) ?? {
         feudSeconds: 25,
         triviaSeconds: 210,
       },
-    teams: (teams ?? []).map((t) => ({ id: t.id, name: t.name, index: t.team_index })),
+    teams: (teams ?? []).map((t) => ({
+      id: t.id,
+      name: t.name,
+      index: t.team_index,
+      logoUrl: (t as { logo_url?: string | null }).logo_url ?? null,
+      emoji: (t as { emoji?: string | null }).emoji ?? null,
+    })),
     initialScores,
     queue,
     cursor,

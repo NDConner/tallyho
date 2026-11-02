@@ -23,14 +23,16 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: "not_target" }, { status: 403 });
   }
 
-  // Don't let a member answer the question they're held out of.
+  // Don't let a member answer a question they're held out of (they may hold
+  // several; a question is a holdout if there's any matching assignment row).
   const { data: ho } = await supabase
     .from("feud_question_assignments")
-    .select("question_id")
+    .select("id")
     .eq("group_id", ctx.group.id)
     .eq("member_id", memberId)
-    .maybeSingle();
-  if (ho?.question_id === questionId) {
+    .eq("question_id", questionId)
+    .limit(1);
+  if (ho && ho.length > 0) {
     return NextResponse.json({ ok: false, error: "holdout" }, { status: 400 });
   }
 

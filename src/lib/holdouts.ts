@@ -6,137 +6,152 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 // ever a holdout.
 const CONSENSUS_TYPES = ["pick_person", "likelihood", "multiple_choice", "open_text"];
 
-// The fresh-question guarantee: every member is held out of exactly one distinct
-// question — the one they'll play live — and they answer all the others. These
-// helpers take a Supabase client so both the admin (authed) and member
-// (service-role) paths can share the exact same logic.
+// The fresh-question guarantee: every consensus question is held out for exactly
+// ONE player (the one who'll play it live, having NOT answered it). Questions are
+// distributed as evenly as possible across players and balanced across teams, so
+// with 40 questions and 20 players each player holds ~2 and answers the other 38,
+// and every authored question gets played. These helpers take a Supabase client
+// so the admin (authed) and member (service-role) paths share the exact logic.
+
+interface PlayerRow {
+  id: string;
+  team_id: string | null;
+}
+
+/** Deterministic, team-balanced plan: question i → players[i % P], where players
+ *  are ordered by team then join order. Returns member→questionIds. */
+function buildPlan(players: PlayerRow[], questionIds: string[]): Map<string, string[]> {
+  const plan = new Map<string, string[]>();
+  for (const p of players) plan.set(p.id, []);
+  if (players.length === 0) return plan;
+  questionIds.forEach((qid, i) => {
+    const p = players[i % players.length];
+    plan.get(p.id)!.push(qid);
+  });
+  return plan;
+}
+
+/** Order players by (team order, join order) so round-robin balances teams. */
+async function orderedPlayers(supabase: SupabaseClient, groupId: string): Promise<PlayerRow[]> {
+  const [{ data: members }, { data: teams }] = await Promise.all([
+    supabase
+      .from("members")
+      .select("id, team_id, created_at")
+      .eq("group_id", groupId)
+      .eq("is_playing", true)
+      .order("created_at"),
+    supabase.from("teams").select("id, team_index").eq("group_id", groupId),
+  ]);
+  const order = new Map<string, number>((teams ?? []).map((t) => [t.id, t.team_index]));
+  return [...(members ?? [])].sort((a, b) => {
+    const ta = a.team_id ? (order.get(a.team_id) ?? 99) : 99;
+    const tb = b.team_id ? (order.get(b.team_id) ?? 99) : 99;
+    if (ta !== tb) return ta - tb;
+    return String(a.created_at).localeCompare(String(b.created_at));
+  });
+}
+
+async function consensusQuestionIds(supabase: SupabaseClient, groupId: string): Promise<string[]> {
+  const { data } = await supabase
+    .from("feud_questions")
+    .select("id, type")
+    .eq("group_id", groupId)
+    .order("created_at");
+  return (data ?? []).filter((q) => CONSENSUS_TYPES.includes(q.type)).map((q) => q.id);
+}
+
+/** True when the current assignments already equal the given plan exactly. */
+function planMatches(
+  plan: Map<string, string[]>,
+  existing: { member_id: string; question_id: string }[],
+): boolean {
+  const want = new Set<string>();
+  for (const [mid, qids] of plan) for (const q of qids) want.add(`${mid}:${q}`);
+  if (existing.length !== want.size) return false;
+  for (const a of existing) if (!want.has(`${a.member_id}:${a.question_id}`)) return false;
+  return true;
+}
 
 /**
- * Ensure one member has a holdout. Guarantees the holdout is a question they
- * have NOT answered (removing a stray response if necessary, so it stays fresh
- * for live play). Returns the holdout question id, or null if there aren't
- * enough distinct questions to hold one out for them.
+ * Apply a balanced holdout plan for the whole group (idempotent): if the current
+ * assignments already match, it does nothing; otherwise it rebuilds them and
+ * un-answers any response a member gave to a question they now hold out (so it
+ * stays fresh for live play). Safe to call repeatedly (fill-out + pre-game).
  */
-export async function ensureMemberHoldout(
+export async function ensureAllHoldouts(supabase: SupabaseClient, groupId: string): Promise<void> {
+  const [players, qIds, { data: existing }] = await Promise.all([
+    orderedPlayers(supabase, groupId),
+    consensusQuestionIds(supabase, groupId),
+    supabase
+      .from("feud_question_assignments")
+      .select("member_id, question_id")
+      .eq("group_id", groupId),
+  ]);
+  if (players.length === 0 || qIds.length === 0) return;
+
+  const plan = buildPlan(players, qIds);
+  if (planMatches(plan, existing ?? [])) return;
+
+  // Rebuild from scratch (simplest correct path).
+  await supabase.from("feud_question_assignments").delete().eq("group_id", groupId);
+  const rows: { group_id: string; question_id: string; member_id: string }[] = [];
+  for (const [memberId, questionIds] of plan) {
+    for (const questionId of questionIds) rows.push({ group_id: groupId, question_id: questionId, member_id: memberId });
+  }
+  if (rows.length) await supabase.from("feud_question_assignments").insert(rows);
+
+  // Un-answer each member's held questions so there's a real tally to guess.
+  for (const [memberId, questionIds] of plan) {
+    if (questionIds.length) {
+      await supabase
+        .from("feud_responses")
+        .delete()
+        .eq("member_id", memberId)
+        .in("question_id", questionIds);
+    }
+  }
+}
+
+/** The set of question ids a single member is held out of (so the fill-out flow
+ *  can exclude them). Ensures the whole-group plan exists first. */
+export async function memberHoldouts(
   supabase: SupabaseClient,
   groupId: string,
   memberId: string,
-): Promise<string | null> {
-  const { data: existing } = await supabase
+): Promise<Set<string>> {
+  await ensureAllHoldouts(supabase, groupId);
+  const { data } = await supabase
     .from("feud_question_assignments")
     .select("question_id")
     .eq("group_id", groupId)
-    .eq("member_id", memberId)
-    .maybeSingle();
-  if (existing) return existing.question_id;
-
-  const [{ data: questions }, { data: held }, { data: answered }] = await Promise.all([
-    supabase.from("feud_questions").select("id, type").eq("group_id", groupId).order("created_at"),
-    supabase.from("feud_question_assignments").select("question_id").eq("group_id", groupId),
-    supabase.from("feud_responses").select("question_id").eq("member_id", memberId),
-  ]);
-
-  const ids = (questions ?? [])
-    .filter((q: { type: string }) => CONSENSUS_TYPES.includes(q.type))
-    .map((q: { id: string }) => q.id);
-  if (ids.length === 0) return null;
-  const heldSet = new Set((held ?? []).map((h: { question_id: string }) => h.question_id));
-  const answeredSet = new Set((answered ?? []).map((a: { question_id: string }) => a.question_id));
-
-  // Prefer a question that's un-held AND unanswered by them; otherwise take any
-  // un-held question and unanswer it below.
-  const candidate =
-    ids.find((id) => !heldSet.has(id) && !answeredSet.has(id)) ??
-    ids.find((id) => !heldSet.has(id));
-  if (!candidate) return null; // every question is already someone's holdout
-
-  const { error } = await supabase
-    .from("feud_question_assignments")
-    .insert({ group_id: groupId, question_id: candidate, member_id: memberId });
-  if (error) {
-    // Lost a race on the unique constraint — return whatever stuck.
-    const { data: again } = await supabase
-      .from("feud_question_assignments")
-      .select("question_id")
-      .eq("group_id", groupId)
-      .eq("member_id", memberId)
-      .maybeSingle();
-    return again?.question_id ?? null;
-  }
-
-  if (answeredSet.has(candidate)) {
-    await supabase
-      .from("feud_responses")
-      .delete()
-      .eq("member_id", memberId)
-      .eq("question_id", candidate);
-  }
-  return candidate;
-}
-
-/** Assign holdouts to every member that lacks one (called pre-game). Processes
- *  members in order, re-reading assignments each time so holdouts stay distinct. */
-export async function ensureAllHoldouts(supabase: SupabaseClient, groupId: string): Promise<void> {
-  const { data: members } = await supabase
-    .from("members")
-    .select("id")
-    .eq("group_id", groupId)
-    .eq("is_playing", true)
-    .order("created_at");
-  for (const m of members ?? []) {
-    await ensureMemberHoldout(supabase, groupId, m.id);
-  }
+    .eq("member_id", memberId);
+  return new Set((data ?? []).map((a) => a.question_id));
 }
 
 /**
- * For a new round: clear existing holdouts and assign each member a DIFFERENT
- * question than last round (unanswering it so it plays fresh). Best-effort if
- * there aren't enough questions to fully rotate.
+ * For "play again": rotate the plan by one player so different people hold (and
+ * therefore play) different questions, then un-answer accordingly. Best-effort.
  */
 export async function reassignHoldoutsNewRound(
   supabase: SupabaseClient,
   groupId: string,
 ): Promise<void> {
-  const { data: prev } = await supabase
-    .from("feud_question_assignments")
-    .select("member_id, question_id")
-    .eq("group_id", groupId);
-  const prevBy = new Map<string, string>((prev ?? []).map((a) => [a.member_id, a.question_id]));
-  await supabase.from("feud_question_assignments").delete().eq("group_id", groupId);
-
-  const [{ data: members }, { data: questions }] = await Promise.all([
-    supabase.from("members").select("id").eq("group_id", groupId).eq("is_playing", true).order("created_at"),
-    supabase.from("feud_questions").select("id, type").eq("group_id", groupId).order("created_at"),
+  const [players, qIds] = await Promise.all([
+    orderedPlayers(supabase, groupId),
+    consensusQuestionIds(supabase, groupId),
   ]);
-  const qIds = (questions ?? [])
-    .filter((q: { type: string }) => CONSENSUS_TYPES.includes(q.type))
-    .map((q: { id: string }) => q.id);
-  const held = new Set<string>();
+  if (players.length === 0 || qIds.length === 0) return;
 
-  for (const m of members ?? []) {
-    const { data: answered } = await supabase
-      .from("feud_responses")
-      .select("question_id")
-      .eq("member_id", m.id);
-    const answeredSet = new Set((answered ?? []).map((a: { question_id: string }) => a.question_id));
-    const prevH = prevBy.get(m.id);
-    // Prefer a different-from-last question they answered (so unanswering it
-    // makes it fresh); then any different un-held question; then anything.
-    const candidate =
-      qIds.find((q) => !held.has(q) && q !== prevH && answeredSet.has(q)) ??
-      qIds.find((q) => !held.has(q) && q !== prevH) ??
-      qIds.find((q) => !held.has(q));
-    if (!candidate) continue;
-    held.add(candidate);
-    await supabase
-      .from("feud_question_assignments")
-      .insert({ group_id: groupId, question_id: candidate, member_id: m.id });
-    if (answeredSet.has(candidate)) {
-      await supabase
-        .from("feud_responses")
-        .delete()
-        .eq("member_id", m.id)
-        .eq("question_id", candidate);
-    }
-  }
+  // Shift the round-robin by one so holdouts differ from last game.
+  const rotated = [...players.slice(1), players[0]];
+  const plan = buildPlan(rotated, qIds);
+
+  await supabase.from("feud_question_assignments").delete().eq("group_id", groupId);
+  const rows: { group_id: string; question_id: string; member_id: string }[] = [];
+  for (const [memberId, questionIds] of plan)
+    for (const questionId of questionIds) rows.push({ group_id: groupId, question_id: questionId, member_id: memberId });
+  if (rows.length) await supabase.from("feud_question_assignments").insert(rows);
+  for (const [memberId, questionIds] of plan)
+    if (questionIds.length)
+      await supabase.from("feud_responses").delete().eq("member_id", memberId).in("question_id", questionIds);
 }

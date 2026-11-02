@@ -1,8 +1,11 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { buildStarterBank } from "@/lib/trivia/generate";
-import { WIN_POINTS } from "@/lib/scoring";
+import { TRIVIA_POINTS } from "@/lib/scoring";
 import { generateJSON, hasAI } from "@/lib/ai/anthropic";
+
+const CONSENSUS_TYPES = ["pick_person", "likelihood", "multiple_choice", "open_text"];
+const norm = (s: string) => (s ?? "").trim().toLowerCase();
 
 interface TeamInput {
   id: string;
@@ -12,7 +15,12 @@ interface TeamInput {
 
 /** Topic-tailored trivia via AI. Returns null on failure so the caller falls
  *  back to the starter pool (and keeps both teams balanced). */
-async function aiTriviaBank(teams: TeamInput[], countPerTeam: number, pointValue: number) {
+async function aiTriviaBank(
+  teams: TeamInput[],
+  countPerTeam: number,
+  pointValue: number,
+  avoid: string[],
+) {
   const out: {
     teamId: string;
     topic: string;
@@ -21,14 +29,17 @@ async function aiTriviaBank(teams: TeamInput[], countPerTeam: number, pointValue
     accepted_variants: string[];
     point_value: number;
   }[] = [];
+  const avoidNote = avoid.length
+    ? `\nAvoid anything too obvious, and specifically avoid these (too easy): ${avoid.slice(0, 20).join("; ")}.`
+    : "\nAvoid anything too obvious — no gimme questions.";
   for (const team of teams) {
     const topics = team.selectedTopics.length ? team.selectedTopics : ["General Knowledge"];
     const ai = await generateJSON<{
       questions: { topic: string; prompt: string; answer: string; variants?: string[] }[];
     }>({
       system:
-        "You write trivia questions with one clear correct answer and a few accepted answer variants. Return JSON only.",
-      prompt: `Write ${countPerTeam} trivia questions spread across these topics: ${topics.join(", ")}.
+        "You write medium-to-hard trivia with one clear correct answer and a few accepted answer variants. Return JSON only.",
+      prompt: `Write ${countPerTeam} trivia questions spread across these topics: ${topics.join(", ")}.${avoidNote}
 JSON: {"questions":[{"topic":string,"prompt":string,"answer":string,"variants":string[]}]}`,
       maxTokens: 1600,
     });
@@ -49,29 +60,37 @@ JSON: {"questions":[{"topic":string,"prompt":string,"answer":string,"variants":s
 }
 
 /**
- * (Re)generate the trivia bank: balanced + calibrated, AI-tailored if a key is
- * set, otherwise the starter pool biased to each team's chosen topics. Replaces
- * any existing bank. Shared by the "Generate" action and the next-round flow.
+ * (Re)generate the trivia bank: balanced, every question worth TRIVIA_POINTS,
+ * AI-tailored if a key is set, otherwise the curated starter pool strictly
+ * matched to each team's chosen topics/categories. Skips any prompts the host
+ * flagged as too obvious. Replaces any existing bank. Shared by the "Generate"
+ * action and the play-again flow.
  */
 export async function regenerateTriviaBank(
   supabase: SupabaseClient,
   groupId: string,
 ): Promise<void> {
-  const [{ data: teams }, { data: members }, { data: selected }] = await Promise.all([
-    supabase.from("teams").select("id, name").eq("group_id", groupId).order("team_index"),
-    supabase.from("members").select("id, team_id").eq("group_id", groupId).eq("is_playing", true),
-    supabase.from("trivia_topics").select("team_id, name").eq("group_id", groupId).eq("selected", true),
-  ]);
+  const [{ data: teams }, { data: members }, { data: selected }, { data: feudQs }, { data: flagged }] =
+    await Promise.all([
+      supabase.from("teams").select("id, name").eq("group_id", groupId).order("team_index"),
+      supabase.from("members").select("id, team_id").eq("group_id", groupId).eq("is_playing", true),
+      supabase.from("trivia_topics").select("team_id, name").eq("group_id", groupId).eq("selected", true),
+      supabase.from("feud_questions").select("type").eq("group_id", groupId),
+      supabase.from("trivia_feedback").select("normalized_prompt").eq("group_id", groupId),
+    ]);
   if (!teams || teams.length === 0) return;
 
-  // Standard scoring: every trivia question is worth a 1st-place answer.
-  const constant = WIN_POINTS;
-
+  // Each team plays the same number of feud turns ≈ the consensus questions
+  // split evenly across teams; size the trivia bank to match (min 5).
+  const consensusCount = (feudQs ?? []).filter((q) => CONSENSUS_TYPES.includes(q.type)).length;
   const sizeByTeam = new Map<string, number>();
   for (const m of members ?? []) {
     if (m.team_id) sizeByTeam.set(m.team_id, (sizeByTeam.get(m.team_id) ?? 0) + 1);
   }
-  const countPerTeam = Math.max(5, 0, ...[...sizeByTeam.values()]);
+  const maxTeam = Math.max(0, ...[...sizeByTeam.values()]);
+  const countPerTeam = Math.max(5, Math.floor(consensusCount / teams.length) || maxTeam);
+
+  const exclude = new Set((flagged ?? []).map((f) => f.normalized_prompt));
 
   const topicsByTeam = new Map<string, string[]>();
   for (const t of selected ?? []) {
@@ -88,11 +107,12 @@ export async function regenerateTriviaBank(
   let rows = buildStarterBank({
     teams: teamInputs.map((t) => ({ id: t.id, selectedTopics: t.selectedTopics })),
     countPerTeam,
-    pointValue: constant,
+    pointValue: TRIVIA_POINTS,
+    exclude,
   });
   if (hasAI()) {
-    const ai = await aiTriviaBank(teamInputs, countPerTeam, constant);
-    if (ai && ai.length) rows = ai;
+    const ai = await aiTriviaBank(teamInputs, countPerTeam, TRIVIA_POINTS, [...exclude]);
+    if (ai && ai.length) rows = ai.filter((r) => !exclude.has(norm(r.prompt)));
   }
 
   await supabase.from("trivia_questions").delete().eq("group_id", groupId);
@@ -108,5 +128,4 @@ export async function regenerateTriviaBank(
       round_no: 1,
     })),
   );
-  await supabase.from("groups").update({ calibration_constant: constant }).eq("id", groupId);
 }

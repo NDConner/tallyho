@@ -7,8 +7,9 @@ import { InviteCard } from "@/components/InviteCard";
 import { CopyButton } from "@/components/CopyButton";
 import { RosterEditor } from "@/components/RosterEditor";
 import { GroupAdmin } from "@/components/GroupAdmin";
+import { GameLengthControl } from "@/components/GameLengthControl";
+import { GameSchedule } from "@/components/GameSchedule";
 import { addMember, generateTriviaBank, reshuffleTeams, addGuest, removeMember } from "./actions";
-import { startGame } from "@/app/play/actions";
 import type { Group, Member, Team } from "@/lib/types";
 
 function appUrl(): string {
@@ -96,21 +97,22 @@ export default async function GroupPage({
       guessWhatByTarget.set(q.target_member_id, (guessWhatByTarget.get(q.target_member_id) ?? 0) + 1);
 
   const answeredByMember = new Map<string, number>();
-  const holdoutMembers = new Set<string>();
+  const holdoutCountByMember = new Map<string, number>();
   if (qIds.length) {
     const [{ data: resp }, { data: asg }] = await Promise.all([
       supabase.from("feud_responses").select("member_id").in("question_id", qIds),
       supabase.from("feud_question_assignments").select("member_id").eq("group_id", id),
     ]);
     for (const r of resp ?? []) answeredByMember.set(r.member_id, (answeredByMember.get(r.member_id) ?? 0) + 1);
-    for (const a of asg ?? []) holdoutMembers.add(a.member_id);
+    for (const a of asg ?? [])
+      holdoutCountByMember.set(a.member_id, (holdoutCountByMember.get(a.member_id) ?? 0) + 1);
   }
   const memberProgress = players.map((m) => {
     const answered = answeredByMember.get(m.id) ?? 0;
     const target = Math.max(
       0,
       consensusCount -
-        (holdoutMembers.has(m.id) ? 1 : 0) +
+        (holdoutCountByMember.get(m.id) ?? 0) +
         guessWhoCount +
         (guessWhatByTarget.get(m.id) ?? 0),
     );
@@ -125,6 +127,8 @@ export default async function GroupPage({
     return { id: m.id, name: m.display_name, answered, target, status };
   });
   const doneCount = memberProgress.filter((p) => p.status === "done").length;
+  // Most questions-per-team the game can run (all consensus questions split evenly).
+  const capacity = Math.max(1, Math.floor(consensusCount / Math.max(1, teams.length)));
 
   // Trivia bank view: each team's chosen topics + generated questions (with answers).
   const [{ data: triviaTopicRows }, { data: triviaQRows }] = await Promise.all([
@@ -181,6 +185,11 @@ export default async function GroupPage({
             {group.dynamic_note ? ` · ${group.dynamic_note}` : ""}
           </p>
           <GroupAdmin groupId={group.id} name={group.name} />
+          <GameSchedule
+            groupId={group.id}
+            gameDate={group.scheduled_time}
+            answerDeadline={(group as Group & { answer_deadline: string | null }).answer_deadline ?? null}
+          />
         </div>
         <div className="flex items-center gap-3">
           <div className="text-right">
@@ -289,6 +298,12 @@ export default async function GroupPage({
               >
                 ✏️ Feud questions
               </Link>
+              <Link
+                href={`/dashboard/g/${group.id}/trivia`}
+                className="btn btn-secondary text-sm"
+              >
+                🧠 Trivia &amp; topics
+              </Link>
               <form action={generateTriviaBank}>
                 <input type="hidden" name="groupId" value={group.id} />
                 <button type="submit" className="btn btn-ghost text-sm">
@@ -304,10 +319,15 @@ export default async function GroupPage({
           {/* trivia bank view */}
           {(triviaCount ?? 0) > 0 && (
             <section className="card p-5">
-              <h2 className="font-display text-lg font-bold">Trivia bank</h2>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h2 className="font-display text-lg font-bold">Trivia bank</h2>
+                <Link href={`/dashboard/g/${group.id}/trivia`} className="btn btn-ghost text-xs">
+                  ✏️ Edit questions &amp; topics
+                </Link>
+              </div>
               <p className="mt-1 text-sm text-cream/55">
-                What each team will face. Too hard or easy? Re-run &ldquo;Generate trivia
-                bank&rdquo; for a fresh set.
+                What each team will face. Edit any question, add your own, swap topics, or re-run
+                &ldquo;Generate trivia bank&rdquo; for a fresh set.
               </p>
               <div className="mt-4 grid gap-4 sm:grid-cols-2">
                 {triviaView.map(({ team, topics, questions }) => (
@@ -445,27 +465,10 @@ export default async function GroupPage({
             {hostReady ? (
               <>
                 <p className="mt-1 text-sm text-cream/55">
-                  Mirror your screen to the TV and run it from here. Feud is 25s per guess; trivia
-                  is 3.5 min per question.
+                  Mirror your screen to the TV and run it from here. Pick how long you want it — each
+                  team plays the same number of questions, and trivia matches feud 1:1.
                 </p>
-                <form action={startGame} className="mt-4 flex flex-wrap items-end gap-3">
-                  <input type="hidden" name="groupId" value={group.id} />
-                  <div>
-                    <label className="label" htmlFor="rounds">
-                      Rounds
-                    </label>
-                    <select id="rounds" name="rounds" defaultValue="1" className="input mt-1 w-auto">
-                      <option value="1">1</option>
-                      <option value="2">2</option>
-                      <option value="3">3</option>
-                      <option value="4">4</option>
-                      <option value="5">5</option>
-                    </select>
-                  </div>
-                  <button type="submit" className="btn btn-primary text-lg">
-                    ▶ Host live game
-                  </button>
-                </form>
+                <GameLengthControl groupId={group.id} capacity={capacity} numTeams={teams.length} />
               </>
             ) : (
               <p className="mt-1 text-sm text-cream/55">
@@ -500,13 +503,19 @@ export default async function GroupPage({
           <InviteCard
             title="For members"
             emoji="🎤"
-            message={memberInvite(group, appUrl())}
+            message={memberInvite(group, appUrl(), {
+              questionCount: totalQuestions,
+              deadline: (group as Group & { answer_deadline: string | null }).answer_deadline ?? null,
+            })}
             accent="cyan"
           />
           <InviteCard
             title="For captains"
             emoji="🎖️"
-            message={captainInvite(group, appUrl())}
+            message={captainInvite(group, appUrl(), {
+              questionCount: totalQuestions,
+              deadline: (group as Group & { answer_deadline: string | null }).answer_deadline ?? null,
+            })}
             accent="magenta"
           />
         </div>

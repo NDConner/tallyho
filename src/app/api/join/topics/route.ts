@@ -15,29 +15,37 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: "not captain of this team" }, { status: 403 });
   }
 
+  // Accept {name, category} objects (custom categories work) or legacy strings.
   // Enforce one topic per category (last pick wins per category).
   const byCategory = new Map<string, string>();
   for (const t of topics as unknown[]) {
-    if (typeof t !== "string") continue;
-    const cat = CATEGORY_OF_TOPIC[t];
-    if (cat) byCategory.set(cat, t);
+    let name = "";
+    let category = "";
+    if (typeof t === "string") {
+      name = t;
+      category = CATEGORY_OF_TOPIC[t] ?? "Mixed";
+    } else if (t && typeof t === "object" && typeof (t as { name?: unknown }).name === "string") {
+      name = (t as { name: string }).name;
+      const c = (t as { category?: unknown }).category;
+      category = (typeof c === "string" && c.trim()) || CATEGORY_OF_TOPIC[name] || "Mixed";
+    } else {
+      continue;
+    }
+    name = name.trim().slice(0, 60);
+    category = category.trim().slice(0, 40);
+    if (name && category) byCategory.set(category, name);
   }
-  const names = [...byCategory.values()];
 
   const supabase = createSupabaseAdminClient();
-  // Replace this team's topic selection.
   await supabase.from("trivia_topics").delete().eq("team_id", teamId);
-  if (names.length) {
-    await supabase.from("trivia_topics").insert(
-      names.map((name) => ({
-        group_id: ctx.group.id,
-        team_id: teamId,
-        category: CATEGORY_OF_TOPIC[name] ?? "Mixed",
-        name,
-        selected: true,
-        source: "custom",
-      })),
-    );
-  }
-  return NextResponse.json({ ok: true, selected: names });
+  const rows = [...byCategory.entries()].map(([category, name]) => ({
+    group_id: ctx.group.id,
+    team_id: teamId,
+    category,
+    name,
+    selected: true,
+    source: "custom",
+  }));
+  if (rows.length) await supabase.from("trivia_topics").insert(rows);
+  return NextResponse.json({ ok: true, selected: rows.map((r) => ({ name: r.name, category: r.category })) });
 }

@@ -27,14 +27,16 @@ export function Wordmark({
   size = "md",
 }: {
   className?: string;
-  size?: "sm" | "md" | "lg";
+  size?: "xs" | "sm" | "md" | "lg";
 }) {
   const scale =
     size === "lg"
       ? "text-5xl sm:text-7xl"
-      : size === "sm"
-        ? "text-xl"
-        : "text-3xl sm:text-4xl";
+      : size === "xs"
+        ? "text-base"
+        : size === "sm"
+          ? "text-xl"
+          : "text-3xl sm:text-4xl";
 
   return (
     <span

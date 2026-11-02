@@ -56,8 +56,8 @@ export default async function QuestionsPage({ params }: { params: Promise<{ id: 
       <h1 className="mt-3 mb-1 font-display text-3xl font-black">Feud questions</h1>
       <p className="mb-6 max-w-2xl text-sm text-cream/55">
         These are what your group answers about each other. Add, edit, or remove freely — bias
-        toward pick-a-person and multiple-choice for clean tallies. Each player will be held out of
-        exactly one of these to play live.
+        toward pick-a-person and multiple-choice for clean tallies. Every question gets played live:
+        each is held out from one player (who&apos;ll guess it), so more questions means a longer game.
       </p>
       <QuestionManager
         groupId={id}

@@ -45,6 +45,8 @@ export interface Group {
   consensus_threshold: number;
   status: GroupStatus;
   scheduled_time: string | null;
+  answer_deadline: string | null;
+  trivia_categories: { name: string; custom: boolean }[] | null;
   created_at: string;
   updated_at: string;
 }
@@ -56,6 +58,8 @@ export interface Team {
   team_index: number;
   crest_seed: string | null;
   captain_member_id: string | null;
+  logo_url: string | null;
+  emoji: string | null;
   created_at: string;
 }
 

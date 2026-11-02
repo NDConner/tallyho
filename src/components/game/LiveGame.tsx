@@ -10,6 +10,7 @@ import {
   scoreTrivia,
   scoreGuessWho,
   scoreGuessWhat,
+  flagTriviaTooObvious,
   persistTurn,
   setGameStatus,
   setGameTimers,
@@ -29,6 +30,7 @@ interface FeudQ {
 interface TriviaQ {
   id: string;
   topic: string;
+  category: string | null;
   prompt: string;
   point_value: number;
 }
@@ -36,6 +38,8 @@ interface TeamLite {
   id: string;
   name: string;
   index: number;
+  logoUrl: string | null;
+  emoji: string | null;
 }
 
 export interface LiveGamePayload {
@@ -43,7 +47,9 @@ export interface LiveGamePayload {
   gameId: string;
   groupName: string;
   allOrNothingValue: number;
+  triviaPoints: number;
   placePoints: number[]; // survey 1st/2nd/3rd point values (e.g. [3,2,1])
+  questionsPerTeam: number;
   settings: { feudSeconds: number; triviaSeconds: number };
   teams: TeamLite[];
   initialScores: Record<string, number>;
@@ -54,10 +60,20 @@ export interface LiveGamePayload {
   topicsByTeam: Record<string, string[]>;
 }
 
-type Phase = "preGame" | "intro" | "feud" | "feudReveal" | "trivia" | "triviaReveal" | "over";
+type Phase = "preGame" | "intro" | "feud" | "feudReveal" | "triviaIntro" | "trivia" | "triviaReveal" | "over";
 
 const TEAM_ACCENT = ["text-magenta", "text-cyan", "text-gold", "text-green"];
 const TEAM_BG = ["bg-magenta", "bg-cyan", "bg-gold", "bg-green"];
+
+/** A team's logo (uploaded), emoji badge, or a plain color dot. */
+function TeamBadge({ team, className }: { team: TeamLite; className?: string }) {
+  const box = className ?? "h-6 w-6";
+  if (team.logoUrl)
+    // eslint-disable-next-line @next/next/no-img-element
+    return <img src={team.logoUrl} alt="" className={cn("rounded-full object-cover", box)} />;
+  if (team.emoji) return <span className={cn("grid place-items-center", box)}>{team.emoji}</span>;
+  return <span className={cn("inline-block rounded-full", box, TEAM_BG[team.index % TEAM_BG.length])} />;
+}
 
 export function LiveGame(p: LiveGamePayload) {
   const router = useRouter();
@@ -76,15 +92,18 @@ export function LiveGame(p: LiveGamePayload) {
   const [guess, setGuess] = useState("");
   const [answer, setAnswer] = useState("");
   const [feudRes, setFeudRes] = useState<FeudResult | null>(null);
+  const [feudBase, setFeudBase] = useState<FeudResult | null>(null); // original (pre-override) for undo
   const [guessRes, setGuessRes] = useState<GuessResult | null>(null);
+  const [guessBase, setGuessBase] = useState<GuessResult | null>(null);
   const [triviaRes, setTriviaRes] = useState<TriviaResult | null>(null);
   const [usedTrivia, setUsedTrivia] = useState<Set<string>>(new Set());
   const [currentTrivia, setCurrentTrivia] = useState<TriviaQ | null>(null);
 
   const turn = p.queue[cursor];
   const total = p.queue.length;
-  const teamIndexById = new Map(p.teams.map((t) => [t.id, t.index]));
-  const accentIdx = turn ? (teamIndexById.get(turn.teamId) ?? 0) % TEAM_ACCENT.length : 0;
+  const teamById = new Map(p.teams.map((t) => [t.id, t]));
+  const activeTeam = turn ? teamById.get(turn.teamId) : undefined;
+  const accentIdx = activeTeam ? activeTeam.index % TEAM_ACCENT.length : 0;
 
   // --- timer ---------------------------------------------------------------
   const onTimeoutRef = useRef<() => void>(() => {});
@@ -111,7 +130,9 @@ export function LiveGame(p: LiveGamePayload) {
   function startFeud() {
     setGuess("");
     setFeudRes(null);
+    setFeudBase(null);
     setGuessRes(null);
+    setGuessBase(null);
     setTimeLeft(feudSeconds);
     setPhase("feud");
   }
@@ -132,8 +153,8 @@ export function LiveGame(p: LiveGamePayload) {
           ...who,
         });
         setGuessRes(res);
-        if (res.points > 0)
-          setScores((s) => ({ ...s, [turn.teamId]: (s[turn.teamId] ?? 0) + res.points }));
+        setGuessBase(res);
+        if (res.points > 0) setScores((s) => ({ ...s, [turn.teamId]: (s[turn.teamId] ?? 0) + res.points }));
       } else if (turn.kind === "guess_what") {
         const res = await scoreGuessWhat({
           gameId: p.gameId,
@@ -144,8 +165,8 @@ export function LiveGame(p: LiveGamePayload) {
           ...who,
         });
         setGuessRes(res);
-        if (res.points > 0)
-          setScores((s) => ({ ...s, [turn.teamId]: (s[turn.teamId] ?? 0) + res.points }));
+        setGuessBase(res);
+        if (res.points > 0) setScores((s) => ({ ...s, [turn.teamId]: (s[turn.teamId] ?? 0) + res.points }));
       } else {
         const res = await scoreFeud({
           gameId: p.gameId,
@@ -155,19 +176,18 @@ export function LiveGame(p: LiveGamePayload) {
           ...who,
         });
         setFeudRes(res);
-        if (res.points > 0)
-          setScores((s) => ({ ...s, [turn.teamId]: (s[turn.teamId] ?? 0) + res.points }));
+        setFeudBase(res);
+        if (res.points > 0) setScores((s) => ({ ...s, [turn.teamId]: (s[turn.teamId] ?? 0) + res.points }));
       }
     } finally {
       setPending(false);
     }
   }
 
+  // Pick a trivia question and show the "get ready" transition (category reveal).
   function continueToTrivia() {
     if (!turn) return;
     const bank = p.triviaByTeam[turn.teamId] ?? [];
-    // Prefer an unused question; if the bank is exhausted (e.g. multi-round),
-    // reuse one so every turn still gets a trivia question.
     let next = bank.find((q) => !usedTrivia.has(q.id));
     if (!next && bank.length > 0) next = bank[Math.floor(Math.random() * bank.length)];
     if (!next) {
@@ -178,8 +198,28 @@ export function LiveGame(p: LiveGamePayload) {
     setCurrentTrivia(next);
     setAnswer("");
     setTriviaRes(null);
+    setPhase("triviaIntro");
+  }
+
+  function startTrivia() {
     setTimeLeft(triviaSeconds);
     setPhase("trivia");
+  }
+
+  // Host: this trivia question is too obvious — log it (to teach future
+  // generation) and swap in the next unused one.
+  async function swapTriviaTooEasy() {
+    if (!turn || !currentTrivia) return;
+    const bank = p.triviaByTeam[turn.teamId] ?? [];
+    const next = bank.find((q) => q.id !== currentTrivia.id && !usedTrivia.has(q.id));
+    const flaggedId = currentTrivia.id;
+    if (next) {
+      setUsedTrivia((s) => new Set(s).add(next.id));
+      setCurrentTrivia(next);
+      setAnswer("");
+      if (phase === "trivia") setTimeLeft(triviaSeconds);
+    }
+    await flagTriviaTooObvious({ groupId: p.groupId, gameId: p.gameId, questionId: flaggedId });
   }
 
   async function submitTrivia() {
@@ -198,8 +238,7 @@ export function LiveGame(p: LiveGamePayload) {
         topic: currentTrivia.topic,
       });
       setTriviaRes(res);
-      if (res.points > 0)
-        setScores((s) => ({ ...s, [turn.teamId]: (s[turn.teamId] ?? 0) + res.points }));
+      if (res.points > 0) setScores((s) => ({ ...s, [turn.teamId]: (s[turn.teamId] ?? 0) + res.points }));
     } finally {
       setPending(false);
     }
@@ -216,7 +255,9 @@ export function LiveGame(p: LiveGamePayload) {
     setCursor(next);
     setCurrentTrivia(null);
     setFeudRes(null);
+    setFeudBase(null);
     setGuessRes(null);
+    setGuessBase(null);
     setTriviaRes(null);
     setPhase("intro");
   }
@@ -233,7 +274,7 @@ export function LiveGame(p: LiveGamePayload) {
     await setGameTimers({ gameId: p.gameId, feudSeconds: f, triviaSeconds: t });
   }
 
-  // Host overrides on the reveal screens (fix a fuzzy-match dispute, etc.).
+  // Host overrides on the feud reveal (award a specific answer the guesser meant).
   async function overrideFeud(bucketLabel: string, awardPoints: number) {
     if (!turn || !feudRes) return;
     const delta = awardPoints - feudRes.points;
@@ -241,24 +282,32 @@ export function LiveGame(p: LiveGamePayload) {
     setScores((s) => ({ ...s, [turn.teamId]: Math.max(0, (s[turn.teamId] ?? 0) + delta) }));
     await adjustScore({ gameId: p.gameId, teamId: turn.teamId, delta });
   }
+  // Undo a feud override back to what was auto-scored.
+  async function undoFeud() {
+    if (!turn || !feudRes || !feudBase) return;
+    const delta = feudBase.points - feudRes.points;
+    setFeudRes(feudBase);
+    if (delta !== 0) {
+      setScores((s) => ({ ...s, [turn.teamId]: Math.max(0, (s[turn.teamId] ?? 0) + delta) }));
+      await adjustScore({ gameId: p.gameId, teamId: turn.teamId, delta });
+    }
+  }
 
-  // Host score fix for any team at any time (e.g. a free-text answer the matcher
-  // didn't catch). Available from the ⚖ Scores panel in the top bar.
   async function adjustTeam(teamId: string, delta: number) {
     setScores((s) => ({ ...s, [teamId]: Math.max(0, (s[teamId] ?? 0) + delta) }));
     await adjustScore({ gameId: p.gameId, teamId, delta });
   }
 
   async function overrideTrivia(makeCorrect: boolean) {
-    if (!turn || !triviaRes || !currentTrivia) return;
-    const target = makeCorrect ? currentTrivia.point_value : 0;
+    if (!turn || !triviaRes) return;
+    const target = makeCorrect ? p.triviaPoints : 0;
     const delta = target - triviaRes.points;
     setTriviaRes({ ...triviaRes, correct: makeCorrect, points: target });
     setScores((s) => ({ ...s, [turn.teamId]: Math.max(0, (s[turn.teamId] ?? 0) + delta) }));
     await adjustScore({ gameId: p.gameId, teamId: turn.teamId, delta });
   }
 
-  // All-or-nothing override for guess_who / guess_what reveals.
+  // All-or-nothing toggle for guess_who / guess_what reveals.
   async function overrideGuess(makeCorrect: boolean) {
     if (!turn || !guessRes) return;
     const target = makeCorrect ? p.allOrNothingValue : 0;
@@ -273,8 +322,6 @@ export function LiveGame(p: LiveGamePayload) {
     <div className="mx-auto flex min-h-screen max-w-4xl flex-col px-4 py-4">
       <TopBar
         groupName={p.groupName}
-        round={turn?.round ?? 1}
-        numRounds={p.queue[total - 1]?.round ?? 1}
         cursor={cursor}
         total={total}
         paused={paused}
@@ -323,14 +370,12 @@ export function LiveGame(p: LiveGamePayload) {
           <div className="w-full max-w-2xl text-center">
             <div className="text-5xl">📋</div>
             <h2 className="mt-3 font-display text-4xl font-black">Tonight&apos;s trivia</h2>
-            <p className="mt-1 text-cream/60">
-              What each team drew. (Feud questions stay a surprise!)
-            </p>
+            <p className="mt-1 text-cream/60">What each team drew. (Feud questions stay a surprise!)</p>
             <div className="mt-6 grid gap-3 sm:grid-cols-2">
               {p.teams.map((t) => (
                 <div key={t.id} className="card p-4 text-left">
                   <div className="flex items-center gap-2">
-                    <span className={cn("h-2.5 w-2.5 rounded-full", TEAM_BG[t.index % TEAM_BG.length])} />
+                    <TeamBadge team={t} className="h-7 w-7 text-lg" />
                     <span className="font-display font-bold">{t.name}</span>
                   </div>
                   <div className="mt-2 flex flex-wrap gap-1.5">
@@ -353,15 +398,18 @@ export function LiveGame(p: LiveGamePayload) {
         )}
 
         {/* INTRO */}
-        {phase === "intro" && turn && (
+        {phase === "intro" && turn && activeTeam && (
           <div className="text-center">
-            <div className="label">
-              {turn.teamName} ·{" "}
-              {turn.kind === "guess_who"
-                ? "whose answer?"
-                : turn.kind === "guess_what"
-                  ? "guess their answer"
-                  : "feud turn"}
+            <div className="flex items-center justify-center gap-2">
+              <TeamBadge team={activeTeam} className="h-7 w-7 text-lg" />
+              <div className="label">
+                {turn.teamName} ·{" "}
+                {turn.kind === "guess_who"
+                  ? "whose answer?"
+                  : turn.kind === "guess_what"
+                    ? "guess their answer"
+                    : "feud turn"}
+              </div>
             </div>
             <h2 className="mt-2 font-display text-5xl font-black">
               <span className={TEAM_ACCENT[accentIdx]}>{turn.memberName}</span> is up!
@@ -390,23 +438,17 @@ export function LiveGame(p: LiveGamePayload) {
                 <div className="mt-6 text-sm text-cream/50">
                   Someone answered “{p.feudQuestions[turn.feudQuestionId]?.prompt ?? "…"}”
                 </div>
-                <div className="mt-2 font-display text-4xl font-black text-gold">
-                  “{turn.revealAnswer}”
-                </div>
+                <div className="mt-2 font-display text-4xl font-black text-gold">“{turn.revealAnswer}”</div>
                 <p className="mt-3 text-lg text-cream/70">Who said it?</p>
                 <div className="chip mt-3 inline-flex">🎯 {p.allOrNothingValue} pts · all or nothing</div>
               </>
             ) : turn.kind === "guess_what" ? (
               <>
-                <div className="mt-6 text-sm text-cream/50">
-                  {turn.targetName}&apos;s answer to:
-                </div>
+                <div className="mt-6 text-sm text-cream/50">{turn.targetName}&apos;s answer to:</div>
                 <h2 className="mt-1 font-display text-3xl font-bold leading-snug">
                   {p.feudQuestions[turn.feudQuestionId]?.prompt ?? "…"}
                 </h2>
-                <p className="mt-3 text-lg text-cream/70">
-                  What did {turn.targetName} say?
-                </p>
+                <p className="mt-3 text-lg text-cream/70">What did {turn.targetName} say?</p>
                 <div className="chip mt-3 inline-flex">🎯 {p.allOrNothingValue} pts · all or nothing</div>
               </>
             ) : (
@@ -432,9 +474,14 @@ export function LiveGame(p: LiveGamePayload) {
                     : `${turn.memberName}, type your guess…`
               }
             />
-            <button onClick={submitSurvey} disabled={pending} className="btn btn-primary mt-5 text-lg">
-              Lock it in
-            </button>
+            <div className="mt-5 flex items-center justify-center gap-2">
+              <button onClick={() => setPhase("intro")} className="btn btn-ghost">
+                ← Back
+              </button>
+              <button onClick={submitSurvey} disabled={pending} className="btn btn-primary text-lg">
+                Lock it in
+              </button>
+            </div>
           </div>
         )}
 
@@ -444,9 +491,11 @@ export function LiveGame(p: LiveGamePayload) {
             groupName={p.groupName}
             guess={guess}
             result={feudRes}
+            base={feudBase}
             placePoints={p.placePoints}
             pending={pending}
             onOverride={overrideFeud}
+            onUndo={undoFeud}
             onContinue={continueToTrivia}
           />
         )}
@@ -455,20 +504,49 @@ export function LiveGame(p: LiveGamePayload) {
             kind={turn.kind}
             guess={guess}
             result={guessRes}
+            base={guessBase}
             pending={pending}
             onOverride={overrideGuess}
             onContinue={continueToTrivia}
           />
         )}
 
+        {/* TRIVIA TRANSITION — tell them the category they'll be grilled on */}
+        {phase === "triviaIntro" && currentTrivia && turn && activeTeam && (
+          <div className="w-full max-w-xl text-center">
+            <div className="text-5xl">📚</div>
+            <p className="mt-3 label">Trivia time</p>
+            <div className="mt-2 flex items-center justify-center gap-2">
+              <TeamBadge team={activeTeam} className="h-7 w-7 text-lg" />
+              <span className="font-display text-2xl font-bold">{turn.teamName}</span>
+            </div>
+            <p className="mt-4 text-cream/70">You&apos;re getting grilled on…</p>
+            <div className="mt-2 font-display text-4xl font-black text-shimmer-gold">{currentTrivia.topic}</div>
+            {currentTrivia.category && (
+              <div className="mt-1 text-sm uppercase tracking-wide text-cream/45">{currentTrivia.category}</div>
+            )}
+            <div className="mt-6 flex items-center justify-center gap-2">
+              <button onClick={() => setPhase("feudReveal")} className="btn btn-ghost">
+                ← Back
+              </button>
+              <button onClick={startTrivia} className="btn btn-primary text-lg">
+                Bring it on →
+              </button>
+            </div>
+            <button onClick={swapTriviaTooEasy} className="mt-4 block w-full text-xs text-cream/40 hover:text-cream">
+              Swap this topic&apos;s question (too easy?)
+            </button>
+          </div>
+        )}
+
         {/* TRIVIA */}
         {phase === "trivia" && currentTrivia && turn && (
           <div className="w-full max-w-2xl text-center">
             <TimerRing seconds={timeLeft} total={triviaSeconds} />
-            <div className="chip mt-6 inline-flex">📚 {currentTrivia.topic} · {currentTrivia.point_value} pts</div>
-            <h2 className="mt-4 font-display text-3xl font-bold leading-snug">
-              {currentTrivia.prompt}
-            </h2>
+            <div className="chip mt-6 inline-flex">
+              📚 {currentTrivia.topic} · {p.triviaPoints} pts
+            </div>
+            <h2 className="mt-4 font-display text-3xl font-bold leading-snug">{currentTrivia.prompt}</h2>
             <p className="mt-2 text-sm text-cream/50">Captain answers for {turn.teamName}.</p>
             <input
               autoFocus
@@ -478,8 +556,16 @@ export function LiveGame(p: LiveGamePayload) {
               onKeyDown={(e) => e.key === "Enter" && submitTrivia()}
               placeholder="Team's answer…"
             />
-            <button onClick={submitTrivia} disabled={pending} className="btn btn-primary mt-5 text-lg">
-              Lock it in
+            <div className="mt-5 flex items-center justify-center gap-2">
+              <button onClick={() => setPhase("triviaIntro")} className="btn btn-ghost">
+                ← Back
+              </button>
+              <button onClick={submitTrivia} disabled={pending} className="btn btn-primary text-lg">
+                Lock it in
+              </button>
+            </div>
+            <button onClick={swapTriviaTooEasy} className="mt-3 text-xs text-cream/40 hover:text-cream">
+              ⚠ Too obvious — swap &amp; flag it
             </button>
           </div>
         )}
@@ -498,7 +584,13 @@ export function LiveGame(p: LiveGamePayload) {
 
         {/* OVER */}
         {phase === "over" && (
-          <GameOver teams={p.teams} scores={scores} groupId={p.groupId} gameId={p.gameId} />
+          <GameOver
+            teams={p.teams}
+            scores={scores}
+            groupId={p.groupId}
+            gameId={p.gameId}
+            questionsPerTeam={p.questionsPerTeam}
+          />
         )}
       </div>
     </div>
@@ -520,8 +612,6 @@ function renderOptions(q?: FeudQ) {
 
 function TopBar({
   groupName,
-  round,
-  numRounds,
   cursor,
   total,
   paused,
@@ -532,8 +622,6 @@ function TopBar({
   phase,
 }: {
   groupName: string;
-  round: number;
-  numRounds: number;
   cursor: number;
   total: number;
   paused: boolean;
@@ -545,11 +633,11 @@ function TopBar({
 }) {
   return (
     <div className="flex items-center justify-between gap-3 text-sm">
-      <div className="text-cream/60">
-        <span className="font-display font-bold text-cream">{groupName}</span> · Round {round}/
-        {numRounds} · Turn {Math.min(cursor + 1, total)}/{total}
+      <div className="min-w-0 truncate text-cream/60">
+        <span className="font-display font-bold text-cream">{groupName}</span> · Question{" "}
+        {Math.min(cursor + 1, total)}/{total}
       </div>
-      <div className="flex items-center gap-2">
+      <div className="flex shrink-0 items-center gap-2">
         {phase !== "over" && (
           <>
             <button onClick={onPause} className="btn btn-ghost px-3 py-1.5 text-xs">
@@ -588,15 +676,15 @@ function Scoreboard({
           <div
             key={t.id}
             className={cn(
-              "card flex items-center justify-between px-4 py-3",
+              "card flex items-center justify-between gap-2 px-3 py-3",
               active && "ring-2 ring-magenta",
             )}
           >
-            <div className="flex items-center gap-2">
-              <span className={cn("h-2.5 w-2.5 rounded-full", TEAM_BG[t.index % TEAM_BG.length])} />
-              <span className="text-sm font-semibold">{t.name}</span>
+            <div className="flex min-w-0 items-center gap-2">
+              <TeamBadge team={t} className="h-5 w-5 shrink-0 text-sm" />
+              <span className="truncate text-sm font-semibold">{t.name}</span>
             </div>
-            <span className="font-display text-2xl font-black">{scores[t.id] ?? 0}</span>
+            <span className="shrink-0 font-display text-2xl font-black tabular-nums">{scores[t.id] ?? 0}</span>
           </div>
         );
       })}
@@ -629,17 +717,21 @@ function FeudRevealPanel({
   groupName,
   guess,
   result,
+  base,
   placePoints,
   pending,
   onOverride,
+  onUndo,
   onContinue,
 }: {
   groupName: string;
   guess: string;
   result: FeudResult | null;
+  base: FeudResult | null;
   placePoints: number[];
   pending: boolean;
   onOverride: (label: string, awardPoints: number) => void;
+  onUndo: () => void;
   onContinue: () => void;
 }) {
   if (!result) {
@@ -651,10 +743,12 @@ function FeudRevealPanel({
     );
   }
   const total = result.buckets.reduce((s, b) => s + b.count, 0);
+  const places = result.places ?? placePoints.length;
   const top = placePoints[0] ?? 0;
   const points = result.points;
   const taglineBucket = points === 0 ? "feudMiss" : points >= top ? "feudBigHit" : "feudSmallHit";
   const ordinals = ["1st", "2nd", "3rd"];
+  const overridden = Boolean(base && (base.points !== result.points || base.matched !== result.matched));
   return (
     <div className="w-full max-w-2xl text-center">
       <SaysReveal groupName={groupName} size="lg" />
@@ -672,7 +766,7 @@ function FeudRevealPanel({
       <div className="mt-4 space-y-2">
         {result.buckets.map((b, i) => {
           const matched = result.matched?.toLowerCase() === b.label.toLowerCase();
-          const award = placePoints[i] ?? 0;
+          const award = i < places ? (placePoints[i] ?? 0) : 0;
           return (
             <button
               key={b.label}
@@ -690,7 +784,7 @@ function FeudRevealPanel({
               />
               <div className="relative flex items-center justify-between gap-3">
                 <span className="flex items-center gap-2 font-semibold">
-                  {i < 3 && (
+                  {i < places && (
                     <span className="rounded-md bg-white/10 px-1.5 py-0.5 text-[0.65rem] font-bold text-cream/70">
                       {ordinals[i]}
                     </span>
@@ -698,9 +792,7 @@ function FeudRevealPanel({
                   {b.label}
                 </span>
                 <span className="flex items-center gap-3">
-                  <span className="text-xs text-cream/45">
-                    {b.count} said
-                  </span>
+                  <span className="text-xs text-cream/45">{b.count} said</span>
                   <span className={cn("font-display text-xl font-black", award > 0 ? "text-gold" : "text-cream/35")}>
                     +{award}
                   </span>
@@ -722,8 +814,20 @@ function FeudRevealPanel({
         </div>
         <p className="mt-1 text-cream/60">{pickTagline(taglineBucket, total)}</p>
         <p className="mt-1 text-xs text-cream/40">
-          Top answer +{placePoints[0] ?? 0}, 2nd +{placePoints[1] ?? 0}, 3rd +{placePoints[2] ?? 0}.
+          {places === 1
+            ? `Only the top answer scores (+${placePoints[0] ?? 0}).`
+            : places === 2
+              ? `Top answer +${placePoints[0] ?? 0}, 2nd +${placePoints[1] ?? 0}.`
+              : `Top +${placePoints[0] ?? 0}, 2nd +${placePoints[1] ?? 0}, 3rd +${placePoints[2] ?? 0}.`}{" "}
           Wrong match? Tap the answer they meant.
+          {overridden && (
+            <>
+              {" "}
+              <button onClick={onUndo} disabled={pending} className="underline hover:text-cream">
+                ↺ Undo
+              </button>
+            </>
+          )}
         </p>
       </div>
       <button onClick={onContinue} disabled={pending} className="btn btn-secondary mt-6 text-lg">
@@ -737,6 +841,7 @@ function GuessRevealPanel({
   kind,
   guess,
   result,
+  base,
   pending,
   onOverride,
   onContinue,
@@ -744,6 +849,7 @@ function GuessRevealPanel({
   kind: string;
   guess: string;
   result: GuessResult | null;
+  base: GuessResult | null;
   pending: boolean;
   onOverride: (correct: boolean) => void;
   onContinue: () => void;
@@ -757,6 +863,7 @@ function GuessRevealPanel({
     );
   }
   const correct = result.correct;
+  const overridden = Boolean(base && base.correct !== result.correct);
   return (
     <div className="w-full max-w-2xl text-center">
       <div className="text-7xl">{correct ? "✅" : "❌"}</div>
@@ -782,7 +889,7 @@ function GuessRevealPanel({
         disabled={pending}
         className="mt-3 text-xs text-cream/45 underline hover:text-cream"
       >
-        {correct ? "Mark it wrong instead" : "Actually correct — give the points"}
+        {overridden ? "↺ Undo" : correct ? "Mark it wrong instead" : "Actually correct — give the points"}
       </button>
       <div className="mt-5">
         <button onClick={onContinue} disabled={pending} className="btn btn-secondary text-lg">
@@ -858,11 +965,13 @@ function GameOver({
   scores,
   groupId,
   gameId,
+  questionsPerTeam,
 }: {
   teams: TeamLite[];
   scores: Record<string, number>;
   groupId: string;
   gameId: string;
+  questionsPerTeam: number;
 }) {
   const ranked = [...teams].sort((a, b) => (scores[b.id] ?? 0) - (scores[a.id] ?? 0));
   const top = ranked[0];
@@ -878,15 +987,16 @@ function GameOver({
           <div
             key={t.id}
             className={cn(
-              "flex items-center justify-between rounded-xl border px-4 py-3",
+              "flex items-center justify-between gap-2 rounded-xl border px-4 py-3",
               i === 0 && !tie ? "border-gold bg-gold/10" : "border-white/10 bg-white/5",
             )}
           >
-            <span className="font-semibold">
-              {i === 0 && !tie ? "👑 " : `${i + 1}. `}
-              {t.name}
+            <span className="flex min-w-0 items-center gap-2 font-semibold">
+              <span className="shrink-0">{i === 0 && !tie ? "👑" : `${i + 1}.`}</span>
+              <TeamBadge team={t} className="h-5 w-5 shrink-0 text-sm" />
+              <span className="truncate">{t.name}</span>
             </span>
-            <span className="font-display text-2xl font-black">{scores[t.id] ?? 0}</span>
+            <span className="shrink-0 font-display text-2xl font-black tabular-nums">{scores[t.id] ?? 0}</span>
           </div>
         ))}
       </div>
@@ -896,8 +1006,9 @@ function GameOver({
         </a>
         <form action={startNextRound}>
           <input type="hidden" name="groupId" value={groupId} />
+          <input type="hidden" name="questionsPerTeam" value={questionsPerTeam} />
           <button type="submit" className="btn btn-secondary">
-            🔄 Play another round
+            🔄 Play again
           </button>
         </form>
         <a href={`/dashboard/g/${groupId}`} className="btn btn-ghost">
@@ -905,8 +1016,8 @@ function GameOver({
         </a>
       </div>
       <p className="mt-3 text-xs text-cream/40">
-        The recap has every stat, superlative and player card — easy to share. Another round
-        reshuffles feud questions and generates fresh trivia.
+        The recap has every stat, superlative and player card — easy to share. Play again reshuffles feud
+        questions and generates fresh trivia.
       </p>
     </div>
   );
@@ -923,8 +1034,14 @@ function SettingsPanel({
   onApply: (f: number, t: number) => void;
   onClose: () => void;
 }) {
-  const [f, setF] = useState(feudSeconds);
-  const [t, setT] = useState(triviaSeconds);
+  // Track as strings so the field can be cleared/edited without snapping to 0.
+  const [f, setF] = useState(String(feudSeconds));
+  const [t, setT] = useState(String(triviaSeconds));
+  const clamp = (v: string, lo: number, hi: number, fallback: number) => {
+    const n = Math.round(Number(v));
+    if (!Number.isFinite(n)) return fallback;
+    return Math.max(lo, Math.min(hi, n));
+  };
   return (
     <div className="card mt-3 p-4">
       <div className="flex items-center justify-between">
@@ -938,10 +1055,12 @@ function SettingsPanel({
           <span className="label">Feud seconds</span>
           <input
             type="number"
+            inputMode="numeric"
             min={5}
             max={120}
             value={f}
-            onChange={(e) => setF(Number(e.target.value))}
+            onChange={(e) => setF(e.target.value)}
+            onBlur={() => setF(String(clamp(f, 5, 120, feudSeconds)))}
             className="input mt-1"
           />
         </label>
@@ -949,17 +1068,19 @@ function SettingsPanel({
           <span className="label">Trivia seconds</span>
           <input
             type="number"
+            inputMode="numeric"
             min={30}
             max={600}
             value={t}
-            onChange={(e) => setT(Number(e.target.value))}
+            onChange={(e) => setT(e.target.value)}
+            onBlur={() => setT(String(clamp(t, 30, 600, triviaSeconds)))}
             className="input mt-1"
           />
         </label>
       </div>
       <button
         onClick={() => {
-          onApply(f, t);
+          onApply(clamp(f, 5, 120, feudSeconds), clamp(t, 30, 600, triviaSeconds));
           onClose();
         }}
         className="btn btn-secondary mt-3 text-sm"
@@ -992,8 +1113,8 @@ function ScoreAdjustPanel({
         </button>
       </div>
       <p className="mt-1 text-xs text-cream/50">
-        Nudge any team if the auto-scoring got something wrong — handy when a free-text answer
-        wasn&apos;t recognized. Changes save immediately.
+        Nudge any team if the auto-scoring got something wrong — handy when a free-text answer wasn&apos;t
+        recognized. Changes save immediately.
       </p>
       <div className="mt-3 space-y-2">
         {teams.map((t) => (
@@ -1002,17 +1123,17 @@ function ScoreAdjustPanel({
             className="flex items-center justify-between gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2"
           >
             <div className="flex min-w-0 items-center gap-2">
-              <span className={cn("h-2.5 w-2.5 rounded-full", TEAM_BG[t.index % TEAM_BG.length])} />
+              <TeamBadge team={t} className="h-5 w-5 shrink-0 text-sm" />
               <span className="truncate text-sm font-semibold">{t.name}</span>
             </div>
-            <div className="flex items-center gap-1.5">
+            <div className="flex shrink-0 items-center gap-1.5">
               <button onClick={() => onAdjust(t.id, -step)} className="btn btn-ghost px-2 py-1 text-xs">
                 −{step}
               </button>
               <button onClick={() => onAdjust(t.id, -1)} className="btn btn-ghost px-2 py-1 text-xs">
                 −1
               </button>
-              <span className="w-9 text-center font-display text-xl font-black">{scores[t.id] ?? 0}</span>
+              <span className="w-9 text-center font-display text-xl font-black tabular-nums">{scores[t.id] ?? 0}</span>
               <button onClick={() => onAdjust(t.id, 1)} className="btn btn-ghost px-2 py-1 text-xs">
                 +1
               </button>

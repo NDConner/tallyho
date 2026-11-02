@@ -4,7 +4,7 @@ import { redirect } from "next/navigation";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { generateJoinCode } from "@/lib/utils";
 import { tallyBuckets, consensusScore } from "@/lib/feud";
-import { averageTopBucket, calibrationConstant, triviaPointValue } from "@/lib/scoring";
+import { TRIVIA_POINTS } from "@/lib/scoring";
 import { DEMO_GROUP, DEMO_TEAMS, DEMO_FEUD, DEMO_TRIVIA_BY_TEAM } from "@/lib/demo/data";
 
 /**
@@ -22,13 +22,6 @@ export async function seedDemoGroup() {
 
   const allNames = DEMO_TEAMS.flatMap((t) => t.members);
 
-  // Calibration constant from the demo's own usable-question top buckets.
-  const usableTops = DEMO_FEUD.filter((q) => q.holdout !== null).map((q) =>
-    Math.max(...q.dist.map(([, n]) => n)),
-  );
-  const constant = calibrationConstant(averageTopBucket(usableTops));
-  const pointValue = triviaPointValue(constant);
-
   // 1) Group
   let groupId: string | null = null;
   for (let i = 0; i < 6 && !groupId; i++) {
@@ -45,7 +38,6 @@ export async function seedDemoGroup() {
         team_assignment: "admin",
         join_code,
         status: "ready",
-        calibration_constant: constant,
       })
       .select("id")
       .single();
@@ -155,7 +147,7 @@ export async function seedDemoGroup() {
         prompt: q.prompt,
         correct_answer: q.answer,
         accepted_variants: q.variants,
-        point_value: pointValue,
+        point_value: TRIVIA_POINTS,
         round_no: 1,
       })),
     );

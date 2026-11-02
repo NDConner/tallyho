@@ -27,11 +27,16 @@ export function consensusScore(buckets: VoteBucket[]): number {
 
 /**
  * Score a feud guess against the tally. Standard, response-independent: points
- * are fixed by the matched answer's RANK (1st/2nd/3rd), not by its vote count.
+ * are fixed by the matched answer's RANK (1st/2nd/3rd), not by its vote count,
+ * and capped to the number of paying ranks for this question (`places`).
  * `matchedLabel` is the bucket the normalizer mapped the guess to (or null).
  */
-export function scoreFeudGuess(buckets: VoteBucket[], matchedLabel: string | null): number {
+export function scoreFeudGuess(
+  buckets: VoteBucket[],
+  matchedLabel: string | null,
+  places?: number,
+): number {
   if (!matchedLabel) return 0;
   const idx = buckets.findIndex((b) => b.label.toLowerCase() === matchedLabel.toLowerCase());
-  return idx === -1 ? 0 : rankPoints(idx);
+  return idx === -1 ? 0 : rankPoints(idx, places);
 }

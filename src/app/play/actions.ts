@@ -8,7 +8,7 @@ import { fuzzyMatch, normalize } from "@/lib/match";
 import { ensureAllHoldouts, reassignHoldoutsNewRound } from "@/lib/holdouts";
 import { regenerateTriviaBank } from "@/lib/trivia/regenerate";
 import { shuffle } from "@/lib/utils";
-import { WIN_POINTS } from "@/lib/scoring";
+import { WIN_POINTS, TRIVIA_POINTS, SURVEY_PLACE_POINTS, placesForChoices } from "@/lib/scoring";
 import type { Member, Team, VoteBucket, SurveyKind } from "@/lib/types";
 
 const DEFAULT_SETTINGS = { feudSeconds: 25, triviaSeconds: 210 };
@@ -33,6 +33,7 @@ export interface FeudResult {
   buckets: VoteBucket[];
   matched: string | null;
   points: number;
+  places: number; // how many ranks paid out for this question (1–3)
 }
 
 export interface TriviaResult {
@@ -50,7 +51,7 @@ export interface GuessResult {
 }
 
 /** Evenly spread k positions across n indices — used to mix targeted
- *  challenges through a round of otherwise-consensus turns. */
+ *  challenges through a run of otherwise-consensus turns. */
 function spacedSlots(n: number, k: number): number[] {
   if (k <= 0 || n <= 0) return [];
   const out = new Set<number>();
@@ -79,35 +80,38 @@ async function addPoints(
   }
 }
 
-/** Build the interleaved turn queue and create a game row. Returns the new game
- *  id, or null if there was nothing to play. */
+/**
+ * Build the turn queue and create a game row. Rounds are gone: each team plays
+ * `questionsPerTeam` turns (a feud turn + a trivia question each), teams stay
+ * equal, and a few turns are swapped for guess_who / guess_what challenges that
+ * spotlight the people named least. Returns the new game id, or null if there
+ * was nothing to play.
+ */
 async function createGameForGroup(
   supabase: SupabaseClient,
   groupId: string,
-  numRounds: number,
+  questionsPerTeam: number,
 ): Promise<string | null> {
-  const [
-    { data: teamData },
-    { data: memberData },
-    { data: assignmentData },
-    { data: questionData },
-  ] = await Promise.all([
-    supabase.from("teams").select("*").eq("group_id", groupId).order("team_index"),
-    supabase.from("members").select("*").eq("group_id", groupId).eq("is_playing", true).order("created_at"),
-    supabase.from("feud_question_assignments").select("*").eq("group_id", groupId),
-    supabase
-      .from("feud_questions")
-      .select("id, type, target_member_id")
-      .eq("group_id", groupId),
-  ]);
+  const [{ data: teamData }, { data: memberData }, { data: assignmentData }, { data: questionData }] =
+    await Promise.all([
+      supabase.from("teams").select("*").eq("group_id", groupId).order("team_index"),
+      supabase.from("members").select("*").eq("group_id", groupId).eq("is_playing", true).order("created_at"),
+      supabase.from("feud_question_assignments").select("member_id, question_id").eq("group_id", groupId),
+      supabase.from("feud_questions").select("id, type, target_member_id").eq("group_id", groupId),
+    ]);
   const teams = (teamData ?? []) as Team[];
   const members = (memberData ?? []) as Member[];
-  const holdoutByMember = new Map<string, string>(
-    (assignmentData ?? []).map((a) => [a.member_id, a.question_id]),
-  );
   const nameById = new Map(members.map((m) => [m.id, m.display_name]));
 
-  // Build the targeted-challenge pool (guess_who / guess_what) from responses.
+  // Each member's held-out (consensus) questions — their live feud turns.
+  const holdoutByMember = new Map<string, string[]>();
+  for (const a of assignmentData ?? []) {
+    const arr = holdoutByMember.get(a.member_id) ?? [];
+    arr.push(a.question_id);
+    holdoutByMember.set(a.member_id, arr);
+  }
+
+  // Targeted-challenge pool (guess_who / guess_what) from responses.
   const questions = (questionData ?? []) as { id: string; type: string; target_member_id: string | null }[];
   const targetedIds = questions.filter((q) => q.type === "guess_who" || q.type === "guess_what").map((q) => q.id);
   const responsesById = new Map<string, { memberId: string; answer: string }[]>();
@@ -131,56 +135,37 @@ async function createGameForGroup(
     if (q.type === "guess_who" && resp.length >= 1) {
       challenges.push({ kind: "guess_who", questionId: q.id, responders: resp });
     } else if (q.type === "guess_what" && q.target_member_id) {
-      const hasAnswer = resp.some((r) => r.memberId === q.target_member_id);
-      if (hasAnswer) challenges.push({ kind: "guess_what", questionId: q.id, targetId: q.target_member_id });
+      if (resp.some((r) => r.memberId === q.target_member_id))
+        challenges.push({ kind: "guess_what", questionId: q.id, targetId: q.target_member_id });
     }
   }
 
-  // Interleave teams' members: T0.m0, T1.m0, T0.m1, T1.m1, …
-  const membersByTeam = new Map<string, Member[]>();
-  for (const t of teams) membersByTeam.set(t.id, members.filter((m) => m.team_id === t.id));
-  const maxLen = Math.max(0, ...[...membersByTeam.values()].map((a) => a.length));
-  const players: { teamId: string; teamName: string; member: Member }[] = [];
-  for (let i = 0; i < maxLen; i++) {
-    for (const t of teams) {
-      const m = membersByTeam.get(t.id)?.[i];
-      if (m) players.push({ teamId: t.id, teamName: t.name, member: m });
-    }
-  }
-
-  const base = (p: (typeof players)[number], round: number) => ({
-    round,
-    teamId: p.teamId,
-    teamName: p.teamName,
-    memberId: p.member.id,
-    memberName: p.member.display_name,
-  });
-
-  // How often each player was NAMED on pick-a-person questions. We use this to
-  // make sure everyone gets a moment: quiet people (named least) are the ones
-  // whose "Whose answer?" cards get surfaced first.
+  // How often each player was NAMED on pick-a-person questions — quiet people
+  // (named least) get their "Whose answer?" cards surfaced first.
   const pickIds = questions.filter((q) => q.type === "pick_person").map((q) => q.id);
   const mentionByMember = new Map<string, number>();
   if (pickIds.length) {
     const nameToId = new Map(members.map((m) => [normalize(m.display_name), m.id]));
-    const { data: picks } = await supabase
-      .from("feud_responses")
-      .select("raw_answer")
-      .in("question_id", pickIds);
+    const { data: picks } = await supabase.from("feud_responses").select("raw_answer").in("question_id", pickIds);
     for (const r of picks ?? []) {
       const id = nameToId.get(normalize(r.raw_answer));
       if (id) mentionByMember.set(id, (mentionByMember.get(id) ?? 0) + 1);
     }
   }
-  // Accumulates across the whole game so different people are spotlighted.
   const featured = new Map<string, number>();
 
-  // A targeted challenge the player is eligible to guess (never their own answer).
-  function buildTargeted(ch: Challenge, p: (typeof players)[number], round: number): GameTurn | null {
+  const base = (teamId: string, teamName: string, m: Member) => ({
+    round: 1,
+    teamId,
+    teamName,
+    memberId: m.id,
+    memberName: m.display_name,
+  });
+
+  function buildTargeted(ch: Challenge, teamId: string, teamName: string, m: Member): GameTurn | null {
     if (ch.kind === "guess_who") {
-      const authors = ch.responders.filter((r) => r.memberId !== p.member.id);
+      const authors = ch.responders.filter((r) => r.memberId !== m.id);
       if (!authors.length) return null;
-      // Spotlight the quiet ones: least-featured first, then least-mentioned.
       const a = [...authors].sort((x, y) => {
         const fx = featured.get(x.memberId) ?? 0;
         const fy = featured.get(y.memberId) ?? 0;
@@ -192,16 +177,16 @@ async function createGameForGroup(
       })[0];
       featured.set(a.memberId, (featured.get(a.memberId) ?? 0) + 1);
       return {
-        ...base(p, round),
+        ...base(teamId, teamName, m),
         kind: "guess_who",
         feudQuestionId: ch.questionId,
         answerMemberId: a.memberId,
         revealAnswer: a.answer,
       };
     }
-    if (ch.targetId === p.member.id) return null;
+    if (ch.targetId === m.id) return null;
     return {
-      ...base(p, round),
+      ...base(teamId, teamName, m),
       kind: "guess_what",
       feudQuestionId: ch.questionId,
       targetMemberId: ch.targetId,
@@ -209,66 +194,84 @@ async function createGameForGroup(
     };
   }
 
-  const queue: GameTurn[] = [];
-  for (let r = 1; r <= numRounds; r++) {
-    const slots = spacedSlots(players.length, challenges.length);
-    const pool = shuffle(challenges); // fresh order each round so authors vary
-    const turnAt: (GameTurn | null)[] = new Array(players.length).fill(null);
-    // Place each targeted challenge at the earliest eligible, unfilled slot.
-    for (const ch of pool) {
-      for (const idx of slots) {
-        if (turnAt[idx]) continue;
-        const turn = buildTargeted(ch, players[idx], r);
-        if (turn) {
-          turnAt[idx] = turn;
+  // Per-team turn lists: interleave each member's holdouts (so members alternate).
+  const usedChallenges = new Set<number>();
+  const pool = shuffle(challenges);
+  const perTeam: GameTurn[][] = [];
+  for (const t of teams) {
+    const teamMembers = members.filter((m) => m.team_id === t.id);
+    const queues = teamMembers.map((m) => ({ m, q: [...(holdoutByMember.get(m.id) ?? [])] }));
+    const turns: GameTurn[] = [];
+    let any = true;
+    while (any) {
+      any = false;
+      for (const row of queues) {
+        const qid = row.q.shift();
+        if (qid) {
+          turns.push({ ...base(t.id, t.name, row.m), kind: "feud", feudQuestionId: qid });
+          any = true;
+        }
+      }
+    }
+    // Weave in targeted challenges by replacing spaced consensus slots.
+    const want = Math.min(pool.length, Math.floor(turns.length / 3));
+    const slots = spacedSlots(turns.length, want);
+    for (const slot of slots) {
+      const player = members.find((m) => m.id === turns[slot].memberId);
+      if (!player) continue;
+      for (let k = 0; k < pool.length; k++) {
+        if (usedChallenges.has(k)) continue;
+        const challengeTurn = buildTargeted(pool[k], t.id, t.name, player);
+        if (challengeTurn) {
+          usedChallenges.add(k);
+          turns[slot] = challengeTurn;
           break;
         }
       }
     }
-    // Everyone else plays their fresh consensus holdout.
-    players.forEach((p, idx) => {
-      if (turnAt[idx]) return;
-      const qid = holdoutByMember.get(p.member.id);
-      if (qid) turnAt[idx] = { ...base(p, r), kind: "feud", feudQuestionId: qid };
-    });
-    for (const t of turnAt) if (t) queue.push(t);
+    perTeam.push(turns);
   }
+
+  // Equalize: every team plays the same number of turns, clamped to the host's
+  // choice (min 3, or the capacity if there are fewer).
+  const capacity = Math.min(...perTeam.map((t) => t.length));
+  if (!Number.isFinite(capacity) || capacity <= 0) return null;
+  const k = Math.max(1, Math.min(questionsPerTeam || capacity, capacity));
+
+  // Interleave teams: T0.t0, T1.t0, T0.t1, T1.t1, …
+  const queue: GameTurn[] = [];
+  for (let i = 0; i < k; i++) for (const t of perTeam) if (t[i]) queue.push(t[i]);
   if (queue.length === 0) return null;
 
-  const settings = {
-    feudSeconds: DEFAULT_SETTINGS.feudSeconds,
-    triviaSeconds: DEFAULT_SETTINGS.triviaSeconds,
-  };
+  const settings = { feudSeconds: DEFAULT_SETTINGS.feudSeconds, triviaSeconds: DEFAULT_SETTINGS.triviaSeconds };
   const { data: gameRow, error } = await supabase
     .from("games")
     .insert({
       group_id: groupId,
       status: "active",
       num_teams: teams.length,
-      num_rounds: numRounds,
+      num_rounds: 1,
       current_round: 1,
       current_team_id: queue[0].teamId,
       current_member_id: queue[0].memberId,
       current_phase: "feud",
       settings,
-      state: { queue, cursor: 0 },
+      state: { queue, cursor: 0, questionsPerTeam: k },
       started_at: new Date().toISOString(),
     })
     .select("id")
     .single();
   if (error || !gameRow) return null;
 
-  await supabase
-    .from("game_scores")
-    .insert(teams.map((t) => ({ game_id: gameRow.id, team_id: t.id, points: 0 })));
+  await supabase.from("game_scores").insert(teams.map((t) => ({ game_id: gameRow.id, team_id: t.id, points: 0 })));
   await supabase.from("groups").update({ status: "live" }).eq("id", groupId);
   return gameRow.id as string;
 }
 
-/** Create a game, build the interleaved turn queue, and jump to the play view. */
+/** Create a game and jump to the play view. `questionsPerTeam` sets the length. */
 export async function startGame(formData: FormData) {
   const groupId = String(formData.get("groupId") || "");
-  const numRounds = Math.max(1, Math.min(5, Number(formData.get("rounds") || 1)));
+  const questionsPerTeam = Math.max(1, Math.min(60, Number(formData.get("questionsPerTeam") || 0)));
   if (!groupId) redirect("/dashboard");
 
   const supabase = await createSupabaseServerClient();
@@ -277,17 +280,17 @@ export async function startGame(formData: FormData) {
   } = await supabase.auth.getUser();
   if (!user) redirect("/login");
 
-  // Guarantee every member has a fresh holdout before building the turn queue.
   await ensureAllHoldouts(supabase, groupId);
-  const gameId = await createGameForGroup(supabase, groupId, numRounds);
+  const gameId = await createGameForGroup(supabase, groupId, questionsPerTeam);
   if (!gameId) redirect(`/dashboard/g/${groupId}`);
   redirect(`/play/${gameId}`);
 }
 
-/** Start another round: give everyone a DIFFERENT feud question and a fresh
- *  trivia bank, then spin up a new game. */
+/** Play again: rotate holdouts so different people play different questions and
+ *  refresh the trivia bank, then spin up a new game of the same length. */
 export async function startNextRound(formData: FormData) {
   const groupId = String(formData.get("groupId") || "");
+  const questionsPerTeam = Math.max(1, Math.min(60, Number(formData.get("questionsPerTeam") || 0)));
   if (!groupId) redirect("/dashboard");
 
   const supabase = await createSupabaseServerClient();
@@ -298,12 +301,13 @@ export async function startNextRound(formData: FormData) {
 
   await reassignHoldoutsNewRound(supabase, groupId);
   await regenerateTriviaBank(supabase, groupId);
-  const gameId = await createGameForGroup(supabase, groupId, 1);
+  const gameId = await createGameForGroup(supabase, groupId, questionsPerTeam);
   if (!gameId) redirect(`/dashboard/g/${groupId}`);
   redirect(`/play/${gameId}`);
 }
 
-/** Tally the group's answers, fuzzy-match the guess, score it, and persist. */
+/** Tally the group's answers, fuzzy-match the guess, score it (capped by how
+ *  many choices the question offered), and persist. */
 export async function scoreFeud(input: {
   gameId: string;
   questionId: string;
@@ -314,15 +318,20 @@ export async function scoreFeud(input: {
   round?: number;
 }): Promise<FeudResult> {
   const supabase = await createSupabaseServerClient();
-  const { data: responses } = await supabase
-    .from("feud_responses")
-    .select("normalized_bucket, raw_answer")
-    .eq("question_id", input.questionId);
+  const [{ data: responses }, { data: q }] = await Promise.all([
+    supabase.from("feud_responses").select("normalized_bucket, raw_answer").eq("question_id", input.questionId),
+    supabase.from("feud_questions").select("type, options").eq("id", input.questionId).maybeSingle(),
+  ]);
 
   const answers = (responses ?? []).map((r) => r.normalized_bucket || r.raw_answer);
   const buckets = tallyBuckets(answers);
   const matched = fuzzyMatch(input.guess, buckets.map((b) => b.label));
-  const points = scoreFeudGuess(buckets, matched);
+  // Option-based questions (multiple_choice / likelihood) cap paying ranks by
+  // how many options they offered; open pick-a-person / open-text keep the full
+  // 3-place feud scale.
+  const optCount = Array.isArray(q?.options) ? (q!.options as string[]).length : 0;
+  const places = optCount > 0 ? placesForChoices(optCount) : SURVEY_PLACE_POINTS.length;
+  const points = scoreFeudGuess(buckets, matched, places);
 
   await addPoints(supabase, input.gameId, input.teamId, points);
   await supabase.from("game_events").insert({
@@ -333,6 +342,7 @@ export async function scoreFeud(input: {
       guess: input.guess,
       matched,
       points,
+      places,
       kind: "feud",
       correct: points > 0,
       teamId: input.teamId,
@@ -342,10 +352,11 @@ export async function scoreFeud(input: {
     },
   });
 
-  return { buckets, matched, points };
+  return { buckets, matched, points, places };
 }
 
-/** Match the captain's answer against accepted variants, score, and persist. */
+/** Match the captain's answer against accepted variants, score (TRIVIA_POINTS),
+ *  and persist. */
 export async function scoreTrivia(input: {
   gameId: string;
   questionId: string;
@@ -357,17 +368,13 @@ export async function scoreTrivia(input: {
   topic?: string;
 }): Promise<TriviaResult> {
   const supabase = await createSupabaseServerClient();
-  const { data: q } = await supabase
-    .from("trivia_questions")
-    .select("*")
-    .eq("id", input.questionId)
-    .single();
+  const { data: q } = await supabase.from("trivia_questions").select("*").eq("id", input.questionId).single();
   if (!q) return { correct: false, points: 0, correctAnswer: "" };
 
   const candidates = [q.correct_answer, ...((q.accepted_variants as string[]) ?? [])];
   const matched = fuzzyMatch(input.answer, candidates);
   const correct = matched !== null;
-  const points = correct ? q.point_value : 0;
+  const points = correct ? TRIVIA_POINTS : 0;
 
   await supabase.from("trivia_questions").update({ used: true }).eq("id", q.id);
   await addPoints(supabase, input.gameId, input.teamId, points);
@@ -390,8 +397,7 @@ export async function scoreTrivia(input: {
   return { correct, points, correctAnswer: q.correct_answer };
 }
 
-/** guess_who: the team named a person; did it match whoever gave the shown
- *  answer? All-or-nothing, worth a 1st-place answer (WIN_POINTS). */
+/** guess_who: did the team name whoever gave the shown answer? All-or-nothing. */
 export async function scoreGuessWho(input: {
   gameId: string;
   questionId: string;
@@ -433,8 +439,7 @@ export async function scoreGuessWho(input: {
   return { correct, points, correctLabel: name };
 }
 
-/** guess_what: the team guessed what the target said. All-or-nothing, worth a
- *  1st-place answer (WIN_POINTS). */
+/** guess_what: did the team guess what the target said? All-or-nothing. */
 export async function scoreGuessWhat(input: {
   gameId: string;
   questionId: string;
@@ -477,12 +482,47 @@ export async function scoreGuessWhat(input: {
   return { correct, points, correctLabel: answer };
 }
 
-/** Persist the turn cursor (so an admin refresh resumes at the right turn). */
-export async function persistTurn(input: {
+/**
+ * Flag a trivia question as too obvious during the game. Logs it so future
+ * generation avoids it, and marks it used so the swap-to-next picks another.
+ */
+export async function flagTriviaTooObvious(input: {
+  groupId: string;
   gameId: string;
-  cursor: number;
-  finished?: boolean;
-}) {
+  questionId: string;
+  reason?: string;
+}): Promise<void> {
+  const supabase = await createSupabaseServerClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return;
+
+  const { data: q } = await supabase
+    .from("trivia_questions")
+    .select("prompt, correct_answer")
+    .eq("id", input.questionId)
+    .maybeSingle();
+  if (!q) return;
+
+  await supabase.from("trivia_feedback").insert({
+    group_id: input.groupId,
+    question_id: input.questionId,
+    prompt: q.prompt,
+    normalized_prompt: normalize(q.prompt),
+    correct_answer: q.correct_answer,
+    reason: input.reason || "too_obvious",
+  });
+  await supabase.from("trivia_questions").update({ used: true }).eq("id", input.questionId);
+  await supabase.from("game_events").insert({
+    game_id: input.gameId,
+    type: "trivia_flagged",
+    payload: { questionId: input.questionId, reason: input.reason || "too_obvious" },
+  });
+}
+
+/** Persist the turn cursor (so an admin refresh resumes at the right turn). */
+export async function persistTurn(input: { gameId: string; cursor: number; finished?: boolean }) {
   const supabase = await createSupabaseServerClient();
   if (input.finished) {
     const { data: g } = await supabase
@@ -494,17 +534,14 @@ export async function persistTurn(input: {
     if (g) await supabase.from("groups").update({ status: "done" }).eq("id", g.group_id);
     return;
   }
-  const { data: game } = await supabase
-    .from("games")
-    .select("state")
-    .eq("id", input.gameId)
-    .single();
-  const queue = ((game?.state as { queue?: GameTurn[] })?.queue ?? []) as GameTurn[];
+  const { data: game } = await supabase.from("games").select("state").eq("id", input.gameId).single();
+  const st = (game?.state as { queue?: GameTurn[]; questionsPerTeam?: number }) ?? {};
+  const queue = (st.queue ?? []) as GameTurn[];
   const turn = queue[input.cursor];
   await supabase
     .from("games")
     .update({
-      state: { queue, cursor: input.cursor },
+      state: { queue, cursor: input.cursor, questionsPerTeam: st.questionsPerTeam ?? null },
       current_round: turn?.round ?? 1,
       current_team_id: turn?.teamId ?? null,
       current_member_id: turn?.memberId ?? null,
@@ -517,11 +554,7 @@ export async function setGameStatus(input: { gameId: string; status: "active" | 
   await supabase.from("games").update({ status: input.status }).eq("id", input.gameId);
 }
 
-export async function setGameTimers(input: {
-  gameId: string;
-  feudSeconds: number;
-  triviaSeconds: number;
-}) {
+export async function setGameTimers(input: { gameId: string; feudSeconds: number; triviaSeconds: number }) {
   const supabase = await createSupabaseServerClient();
   await supabase
     .from("games")
@@ -529,8 +562,7 @@ export async function setGameTimers(input: {
     .eq("id", input.gameId);
 }
 
-/** Adjust a team's running score by a delta — used for host overrides on the
- *  reveal screens (fixing a fuzzy-match dispute, marking trivia right/wrong). */
+/** Adjust a team's running score by a delta — host overrides on reveal screens. */
 export async function adjustScore(input: { gameId: string; teamId: string; delta: number }) {
   if (!input.delta) return;
   const supabase = await createSupabaseServerClient();
