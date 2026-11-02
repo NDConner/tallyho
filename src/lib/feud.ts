@@ -1,4 +1,5 @@
 import type { VoteBucket } from "@/lib/types";
+import { rankPoints } from "@/lib/scoring";
 
 /** Tally answers into sorted vote buckets (highest count first). */
 export function tallyBuckets(answers: string[]): VoteBucket[] {
@@ -25,11 +26,12 @@ export function consensusScore(buckets: VoteBucket[]): number {
 }
 
 /**
- * Score a feud guess against the tally: points = votes in the matching bucket.
+ * Score a feud guess against the tally. Standard, response-independent: points
+ * are fixed by the matched answer's RANK (1st/2nd/3rd), not by its vote count.
  * `matchedLabel` is the bucket the normalizer mapped the guess to (or null).
  */
 export function scoreFeudGuess(buckets: VoteBucket[], matchedLabel: string | null): number {
   if (!matchedLabel) return 0;
-  const hit = buckets.find((b) => b.label.toLowerCase() === matchedLabel.toLowerCase());
-  return hit ? hit.count : 0;
+  const idx = buckets.findIndex((b) => b.label.toLowerCase() === matchedLabel.toLowerCase());
+  return idx === -1 ? 0 : rankPoints(idx);
 }

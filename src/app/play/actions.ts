@@ -4,10 +4,11 @@ import { redirect } from "next/navigation";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { tallyBuckets, scoreFeudGuess } from "@/lib/feud";
-import { fuzzyMatch } from "@/lib/match";
+import { fuzzyMatch, normalize } from "@/lib/match";
 import { ensureAllHoldouts, reassignHoldoutsNewRound } from "@/lib/holdouts";
 import { regenerateTriviaBank } from "@/lib/trivia/regenerate";
 import { shuffle } from "@/lib/utils";
+import { WIN_POINTS } from "@/lib/scoring";
 import type { Member, Team, VoteBucket, SurveyKind } from "@/lib/types";
 
 const DEFAULT_SETTINGS = { feudSeconds: 25, triviaSeconds: 210 };
@@ -92,7 +93,7 @@ async function createGameForGroup(
     { data: questionData },
   ] = await Promise.all([
     supabase.from("teams").select("*").eq("group_id", groupId).order("team_index"),
-    supabase.from("members").select("*").eq("group_id", groupId).order("created_at"),
+    supabase.from("members").select("*").eq("group_id", groupId).eq("is_playing", true).order("created_at"),
     supabase.from("feud_question_assignments").select("*").eq("group_id", groupId),
     supabase
       .from("feud_questions")
@@ -155,12 +156,41 @@ async function createGameForGroup(
     memberName: p.member.display_name,
   });
 
+  // How often each player was NAMED on pick-a-person questions. We use this to
+  // make sure everyone gets a moment: quiet people (named least) are the ones
+  // whose "Whose answer?" cards get surfaced first.
+  const pickIds = questions.filter((q) => q.type === "pick_person").map((q) => q.id);
+  const mentionByMember = new Map<string, number>();
+  if (pickIds.length) {
+    const nameToId = new Map(members.map((m) => [normalize(m.display_name), m.id]));
+    const { data: picks } = await supabase
+      .from("feud_responses")
+      .select("raw_answer")
+      .in("question_id", pickIds);
+    for (const r of picks ?? []) {
+      const id = nameToId.get(normalize(r.raw_answer));
+      if (id) mentionByMember.set(id, (mentionByMember.get(id) ?? 0) + 1);
+    }
+  }
+  // Accumulates across the whole game so different people are spotlighted.
+  const featured = new Map<string, number>();
+
   // A targeted challenge the player is eligible to guess (never their own answer).
   function buildTargeted(ch: Challenge, p: (typeof players)[number], round: number): GameTurn | null {
     if (ch.kind === "guess_who") {
       const authors = ch.responders.filter((r) => r.memberId !== p.member.id);
       if (!authors.length) return null;
-      const a = authors[Math.floor(Math.random() * authors.length)];
+      // Spotlight the quiet ones: least-featured first, then least-mentioned.
+      const a = [...authors].sort((x, y) => {
+        const fx = featured.get(x.memberId) ?? 0;
+        const fy = featured.get(y.memberId) ?? 0;
+        if (fx !== fy) return fx - fy;
+        const mx = mentionByMember.get(x.memberId) ?? 0;
+        const my = mentionByMember.get(y.memberId) ?? 0;
+        if (mx !== my) return mx - my;
+        return Math.random() - 0.5;
+      })[0];
+      featured.set(a.memberId, (featured.get(a.memberId) ?? 0) + 1);
       return {
         ...base(p, round),
         kind: "guess_who",
@@ -279,6 +309,9 @@ export async function scoreFeud(input: {
   questionId: string;
   teamId: string;
   guess: string;
+  memberId?: string;
+  memberName?: string;
+  round?: number;
 }): Promise<FeudResult> {
   const supabase = await createSupabaseServerClient();
   const { data: responses } = await supabase
@@ -295,7 +328,18 @@ export async function scoreFeud(input: {
   await supabase.from("game_events").insert({
     game_id: input.gameId,
     type: "feud_result",
-    payload: { questionId: input.questionId, guess: input.guess, matched, points },
+    payload: {
+      questionId: input.questionId,
+      guess: input.guess,
+      matched,
+      points,
+      kind: "feud",
+      correct: points > 0,
+      teamId: input.teamId,
+      memberId: input.memberId ?? null,
+      memberName: input.memberName ?? null,
+      round: input.round ?? null,
+    },
   });
 
   return { buckets, matched, points };
@@ -307,6 +351,10 @@ export async function scoreTrivia(input: {
   questionId: string;
   teamId: string;
   answer: string;
+  memberId?: string;
+  memberName?: string;
+  round?: number;
+  topic?: string;
 }): Promise<TriviaResult> {
   const supabase = await createSupabaseServerClient();
   const { data: q } = await supabase
@@ -326,40 +374,35 @@ export async function scoreTrivia(input: {
   await supabase.from("game_events").insert({
     game_id: input.gameId,
     type: "trivia_result",
-    payload: { questionId: q.id, answer: input.answer, correct, points },
+    payload: {
+      questionId: q.id,
+      answer: input.answer,
+      correct,
+      points,
+      topic: input.topic ?? q.topic,
+      teamId: input.teamId,
+      memberId: input.memberId ?? null,
+      memberName: input.memberName ?? null,
+      round: input.round ?? null,
+    },
   });
 
   return { correct, points, correctAnswer: q.correct_answer };
 }
 
-/** The group's all-or-nothing point value — its calibration constant (floor 2),
- *  so guess_who / guess_what are worth a solid feud answer. */
-async function groupConstant(supabase: SupabaseClient, groupId: string): Promise<number> {
-  const { data: g } = await supabase
-    .from("groups")
-    .select("calibration_constant")
-    .eq("id", groupId)
-    .single();
-  const c = Number(g?.calibration_constant ?? 0);
-  if (c >= 2) return Math.round(c);
-  const { count } = await supabase
-    .from("members")
-    .select("id", { count: "exact", head: true })
-    .eq("group_id", groupId);
-  return Math.max(2, Math.round((count ?? 4) / 2));
-}
-
 /** guess_who: the team named a person; did it match whoever gave the shown
- *  answer? All-or-nothing. */
+ *  answer? All-or-nothing, worth a 1st-place answer (WIN_POINTS). */
 export async function scoreGuessWho(input: {
   gameId: string;
   questionId: string;
   answerMemberId: string;
   teamId: string;
   guess: string;
+  memberId?: string;
+  memberName?: string;
+  round?: number;
 }): Promise<GuessResult> {
   const supabase = await createSupabaseServerClient();
-  const { data: game } = await supabase.from("games").select("group_id").eq("id", input.gameId).single();
   const { data: author } = await supabase
     .from("members")
     .select("display_name")
@@ -367,28 +410,42 @@ export async function scoreGuessWho(input: {
     .single();
   const name = author?.display_name ?? "";
   const correct = name ? fuzzyMatch(input.guess, [name]) !== null : false;
-  const constant = await groupConstant(supabase, (game?.group_id as string) ?? "");
-  const points = correct ? constant : 0;
+  const points = correct ? WIN_POINTS : 0;
 
   await addPoints(supabase, input.gameId, input.teamId, points);
   await supabase.from("game_events").insert({
     game_id: input.gameId,
     type: "guess_who_result",
-    payload: { questionId: input.questionId, guess: input.guess, correct, points },
+    payload: {
+      questionId: input.questionId,
+      guess: input.guess,
+      correct,
+      points,
+      kind: "guess_who",
+      correctLabel: name,
+      authorMemberId: input.answerMemberId,
+      teamId: input.teamId,
+      memberId: input.memberId ?? null,
+      memberName: input.memberName ?? null,
+      round: input.round ?? null,
+    },
   });
   return { correct, points, correctLabel: name };
 }
 
-/** guess_what: the team guessed what the target said. All-or-nothing. */
+/** guess_what: the team guessed what the target said. All-or-nothing, worth a
+ *  1st-place answer (WIN_POINTS). */
 export async function scoreGuessWhat(input: {
   gameId: string;
   questionId: string;
   targetMemberId: string;
   teamId: string;
   guess: string;
+  memberId?: string;
+  memberName?: string;
+  round?: number;
 }): Promise<GuessResult> {
   const supabase = await createSupabaseServerClient();
-  const { data: game } = await supabase.from("games").select("group_id").eq("id", input.gameId).single();
   const { data: resp } = await supabase
     .from("feud_responses")
     .select("raw_answer")
@@ -397,14 +454,25 @@ export async function scoreGuessWhat(input: {
     .maybeSingle();
   const answer = resp?.raw_answer ?? "";
   const correct = answer ? fuzzyMatch(input.guess, [answer]) !== null : false;
-  const constant = await groupConstant(supabase, (game?.group_id as string) ?? "");
-  const points = correct ? constant : 0;
+  const points = correct ? WIN_POINTS : 0;
 
   await addPoints(supabase, input.gameId, input.teamId, points);
   await supabase.from("game_events").insert({
     game_id: input.gameId,
     type: "guess_what_result",
-    payload: { questionId: input.questionId, guess: input.guess, correct, points },
+    payload: {
+      questionId: input.questionId,
+      guess: input.guess,
+      correct,
+      points,
+      kind: "guess_what",
+      correctLabel: answer,
+      targetMemberId: input.targetMemberId,
+      teamId: input.teamId,
+      memberId: input.memberId ?? null,
+      memberName: input.memberName ?? null,
+      round: input.round ?? null,
+    },
   });
   return { correct, points, correctLabel: answer };
 }

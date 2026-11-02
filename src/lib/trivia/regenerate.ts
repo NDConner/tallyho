@@ -1,44 +1,13 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { buildStarterBank } from "@/lib/trivia/generate";
-import { tallyBuckets } from "@/lib/feud";
-import { calibrationConstant, averageTopBucket } from "@/lib/scoring";
+import { WIN_POINTS } from "@/lib/scoring";
 import { generateJSON, hasAI } from "@/lib/ai/anthropic";
 
 interface TeamInput {
   id: string;
   name: string;
   selectedTopics: string[];
-}
-
-/** Calibration constant from the group's own answer distributions (floor 2). */
-async function computeCalibration(
-  supabase: SupabaseClient,
-  groupId: string,
-  memberCount: number,
-): Promise<number> {
-  const { data: qs } = await supabase.from("feud_questions").select("id").eq("group_id", groupId);
-  const ids = (qs ?? []).map((q: { id: string }) => q.id);
-  if (!ids.length) return Math.max(2, Math.round(memberCount / 2));
-
-  const { data: resp } = await supabase
-    .from("feud_responses")
-    .select("question_id, normalized_bucket, raw_answer")
-    .in("question_id", ids);
-
-  const byQ = new Map<string, string[]>();
-  for (const r of resp ?? []) {
-    const arr = byQ.get(r.question_id) ?? [];
-    arr.push(r.normalized_bucket || r.raw_answer);
-    byQ.set(r.question_id, arr);
-  }
-  const tops: number[] = [];
-  for (const [, answers] of byQ) {
-    const buckets = tallyBuckets(answers);
-    if (buckets.length) tops.push(buckets[0].count);
-  }
-  if (!tops.length) return Math.max(2, Math.round(memberCount / 2));
-  return calibrationConstant(averageTopBucket(tops));
 }
 
 /** Topic-tailored trivia via AI. Returns null on failure so the caller falls
@@ -90,13 +59,13 @@ export async function regenerateTriviaBank(
 ): Promise<void> {
   const [{ data: teams }, { data: members }, { data: selected }] = await Promise.all([
     supabase.from("teams").select("id, name").eq("group_id", groupId).order("team_index"),
-    supabase.from("members").select("id, team_id").eq("group_id", groupId),
+    supabase.from("members").select("id, team_id").eq("group_id", groupId).eq("is_playing", true),
     supabase.from("trivia_topics").select("team_id, name").eq("group_id", groupId).eq("selected", true),
   ]);
   if (!teams || teams.length === 0) return;
 
-  const memberCount = (members ?? []).length;
-  const constant = await computeCalibration(supabase, groupId, memberCount);
+  // Standard scoring: every trivia question is worth a 1st-place answer.
+  const constant = WIN_POINTS;
 
   const sizeByTeam = new Map<string, number>();
   for (const m of members ?? []) {

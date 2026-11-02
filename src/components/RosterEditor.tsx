@@ -1,8 +1,8 @@
 "use client";
 
-import { useTransition } from "react";
+import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import { moveMember, setCaptain } from "@/app/dashboard/g/[id]/actions";
+import { moveMember, setCaptain, renameTeam } from "@/app/dashboard/g/[id]/actions";
 import type { Member, Team } from "@/lib/types";
 
 export function RosterEditor({
@@ -16,6 +16,8 @@ export function RosterEditor({
 }) {
   const router = useRouter();
   const [pending, start] = useTransition();
+  const [editTeam, setEditTeam] = useState<string | null>(null);
+  const [teamName, setTeamName] = useState("");
 
   function move(memberId: string, teamId: string) {
     start(async () => {
@@ -29,6 +31,15 @@ export function RosterEditor({
       router.refresh();
     });
   }
+  function saveTeamName(teamId: string, original: string) {
+    const name = teamName.trim();
+    setEditTeam(null);
+    if (!name || name === original) return;
+    start(async () => {
+      await renameTeam({ groupId, teamId, name });
+      router.refresh();
+    });
+  }
 
   return (
     <div className="mt-4 grid gap-4 sm:grid-cols-2">
@@ -36,7 +47,37 @@ export function RosterEditor({
         const teamMembers = members.filter((m) => m.team_id === team.id);
         return (
           <div key={team.id} className="rounded-xl border border-white/10 bg-white/5 p-4">
-            <h3 className="font-display font-bold">{team.name}</h3>
+            <div className="flex items-center justify-between gap-2">
+              {editTeam === team.id ? (
+                <input
+                  autoFocus
+                  value={teamName}
+                  maxLength={40}
+                  onChange={(e) => setTeamName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") saveTeamName(team.id, team.name);
+                    if (e.key === "Escape") setEditTeam(null);
+                  }}
+                  onBlur={() => saveTeamName(team.id, team.name)}
+                  className="input w-auto text-sm"
+                />
+              ) : (
+                <h3 className="font-display font-bold">{team.name}</h3>
+              )}
+              {editTeam !== team.id && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setTeamName(team.name);
+                    setEditTeam(team.id);
+                  }}
+                  className="text-xs text-cream/35 hover:text-cyan"
+                  title="Rename team"
+                >
+                  ✏️
+                </button>
+              )}
+            </div>
             <ul className="mt-2 space-y-1.5 text-sm">
               {teamMembers.length === 0 && <li className="text-cream/40">No players yet</li>}
               {teamMembers.map((m) => {

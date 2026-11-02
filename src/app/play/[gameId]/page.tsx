@@ -1,6 +1,7 @@
 import { redirect } from "next/navigation";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { LiveGame, type LiveGamePayload } from "@/components/game/LiveGame";
+import { SURVEY_PLACE_POINTS, WIN_POINTS } from "@/lib/scoring";
 import type { GameTurn } from "@/app/play/actions";
 
 export default async function PlayPage({ params }: { params: Promise<{ gameId: string }> }) {
@@ -17,7 +18,7 @@ export default async function PlayPage({ params }: { params: Promise<{ gameId: s
 
   const { data: group } = await supabase
     .from("groups")
-    .select("name, calibration_constant")
+    .select("name")
     .eq("id", groupId)
     .single();
 
@@ -68,17 +69,16 @@ export default async function PlayPage({ params }: { params: Promise<{ gameId: s
   for (const t of teams ?? []) initialScores[t.id] = 0;
   for (const s of scoreRows ?? []) initialScores[s.team_id] = s.points;
 
-  // All-or-nothing value for guess_who / guess_what = the group's calibration
-  // constant (same as a trivia question). Fall back to the trivia point value.
-  const constant = Number(group?.calibration_constant ?? 0);
-  const allOrNothingValue =
-    constant >= 2 ? Math.round(constant) : (trivia ?? [])[0]?.point_value ?? 3;
+  // Standard scoring: a correct all-or-nothing guess (guess_who / guess_what)
+  // and a correct trivia answer each equal a 1st-place survey answer.
+  const allOrNothingValue = WIN_POINTS;
 
   const payload: LiveGamePayload = {
     groupId,
     gameId,
     groupName: group?.name ?? "The group",
     allOrNothingValue,
+    placePoints: [...SURVEY_PLACE_POINTS],
     settings:
       (game.settings as { feudSeconds: number; triviaSeconds: number }) ?? {
         feudSeconds: 25,

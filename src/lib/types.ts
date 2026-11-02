@@ -64,6 +64,7 @@ export interface Member {
   group_id: string;
   display_name: string;
   is_captain: boolean;
+  is_playing: boolean; // false = "answer-only" guest (pickable, but not at game night)
   team_id: string | null;
   avatar_seed: string | null;
   created_at: string;

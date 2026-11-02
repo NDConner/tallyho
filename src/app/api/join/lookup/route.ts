@@ -18,10 +18,12 @@ export async function POST(req: Request) {
     groupName: ctx.group.name,
     dynamicNote: ctx.group.dynamic_note,
     code: ctx.group.join_code,
-    members: ctx.members.map((m) => ({
-      id: m.id,
-      name: m.display_name,
-      isCaptain: m.is_captain,
-    })),
+    members: ctx.members
+      .filter((m) => m.is_playing !== false)
+      .map((m) => ({
+        id: m.id,
+        name: m.display_name,
+        isCaptain: m.is_captain,
+      })),
   });
 }

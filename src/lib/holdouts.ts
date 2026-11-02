@@ -81,6 +81,7 @@ export async function ensureAllHoldouts(supabase: SupabaseClient, groupId: strin
     .from("members")
     .select("id")
     .eq("group_id", groupId)
+    .eq("is_playing", true)
     .order("created_at");
   for (const m of members ?? []) {
     await ensureMemberHoldout(supabase, groupId, m.id);
@@ -104,7 +105,7 @@ export async function reassignHoldoutsNewRound(
   await supabase.from("feud_question_assignments").delete().eq("group_id", groupId);
 
   const [{ data: members }, { data: questions }] = await Promise.all([
-    supabase.from("members").select("id").eq("group_id", groupId).order("created_at"),
+    supabase.from("members").select("id").eq("group_id", groupId).eq("is_playing", true).order("created_at"),
     supabase.from("feud_questions").select("id, type").eq("group_id", groupId).order("created_at"),
   ]);
   const qIds = (questions ?? [])

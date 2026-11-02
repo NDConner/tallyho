@@ -17,7 +17,7 @@ export async function lookupGroup(code: string) {
   const [{ data: members }, { data: teams }] = await Promise.all([
     supabase
       .from("members")
-      .select("id, display_name, is_captain, team_id")
+      .select("id, display_name, is_captain, team_id, is_playing")
       .eq("group_id", group.id)
       .order("created_at"),
     supabase.from("teams").select("id, name, team_index").eq("group_id", group.id).order("team_index"),
@@ -29,7 +29,7 @@ export async function validateMember(code: string, memberId: string) {
   const ctx = await lookupGroup(code);
   if (!ctx) return null;
   const member = ctx.members.find((m) => m.id === memberId);
-  if (!member) return null;
+  if (!member || member.is_playing === false) return null; // answer-only guests can't be "me"
   return { ...ctx, member };
 }
 

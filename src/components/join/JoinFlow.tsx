@@ -48,6 +48,7 @@ export function JoinFlow({ initialCode }: { initialCode?: string }) {
   const [busy, setBusy] = useState(false);
   const [group, setGroup] = useState<{ groupName: string; members: MemberLite[] } | null>(null);
   const [tasks, setTasks] = useState<Tasks | null>(null);
+  const [identifyFilter, setIdentifyFilter] = useState("");
   const didAuto = useRef(false);
 
   useEffect(() => {
@@ -148,18 +149,29 @@ export function JoinFlow({ initialCode }: { initialCode?: string }) {
             <p className="text-center text-sm text-cream/60">You&apos;re joining</p>
             <h1 className="text-center font-display text-2xl font-bold">{group.groupName}</h1>
             <p className="mt-5 mb-2 text-center label">Who are you?</p>
+            {group.members.length > 8 && (
+              <input
+                autoFocus
+                value={identifyFilter}
+                onChange={(e) => setIdentifyFilter(e.target.value)}
+                placeholder="Type your name to find yourself…"
+                className="input mb-2 text-sm"
+              />
+            )}
             <div className="grid grid-cols-2 gap-2">
-              {group.members.map((m) => (
-                <button
-                  key={m.id}
-                  onClick={() => pickMe(m.id)}
-                  disabled={busy}
-                  className="rounded-xl border border-white/10 bg-white/5 px-3 py-3 text-sm font-semibold transition hover:border-magenta hover:bg-magenta/10 hover:text-cream disabled:opacity-50"
-                >
-                  {m.name}
-                  {m.isCaptain && <span className="ml-1">🎖️</span>}
-                </button>
-              ))}
+              {group.members
+                .filter((m) => m.name.toLowerCase().includes(identifyFilter.trim().toLowerCase()))
+                .map((m) => (
+                  <button
+                    key={m.id}
+                    onClick={() => pickMe(m.id)}
+                    disabled={busy}
+                    className="rounded-xl border border-white/10 bg-white/5 px-3 py-3 text-sm font-semibold transition hover:border-magenta hover:bg-magenta/10 hover:text-cream disabled:opacity-50"
+                  >
+                    {m.name}
+                    {m.isCaptain && <span className="ml-1">🎖️</span>}
+                  </button>
+                ))}
             </div>
           </div>
         )}
@@ -213,6 +225,92 @@ function OptionButton({
   );
 }
 
+/** A captain renames their own team from their phone. */
+function TeamNameEditor({
+  code,
+  memberId,
+  teamId,
+  name,
+  onRenamed,
+}: {
+  code: string;
+  memberId: string;
+  teamId: string;
+  name: string;
+  onRenamed: (n: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [val, setVal] = useState(name);
+  const [busy, setBusy] = useState(false);
+
+  async function save() {
+    const next = val.trim();
+    if (!next || next === name) {
+      setVal(name);
+      setEditing(false);
+      return;
+    }
+    setBusy(true);
+    try {
+      const res = await fetch("/api/join/team-name", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code, memberId, teamId, name: next }),
+      });
+      const data = await res.json();
+      if (data.ok) onRenamed(data.name ?? next);
+    } finally {
+      setBusy(false);
+      setEditing(false);
+    }
+  }
+
+  if (!editing) {
+    return (
+      <button
+        type="button"
+        onClick={() => {
+          setVal(name);
+          setEditing(true);
+        }}
+        className="text-xs text-cyan hover:underline"
+      >
+        ✏️ Rename team
+      </button>
+    );
+  }
+  return (
+    <div className="flex items-center justify-center gap-2">
+      <input
+        autoFocus
+        value={val}
+        maxLength={40}
+        onChange={(e) => setVal(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") save();
+          if (e.key === "Escape") {
+            setVal(name);
+            setEditing(false);
+          }
+        }}
+        className="input w-auto text-sm"
+      />
+      <button onClick={save} disabled={busy} className="btn btn-primary text-xs">
+        {busy ? "…" : "Save"}
+      </button>
+      <button
+        onClick={() => {
+          setVal(name);
+          setEditing(false);
+        }}
+        className="btn btn-ghost text-xs"
+      >
+        Cancel
+      </button>
+    </div>
+  );
+}
+
 function TaskFlow({
   code,
   tasks,
@@ -237,12 +335,15 @@ function TaskFlow({
   );
   const [busy, setBusy] = useState(false);
   const [text, setText] = useState(answers[tasks.questions[0]?.id] ?? "");
+  const [optFilter, setOptFilter] = useState("");
+  const [teamName, setTeamName] = useState(tasks.captain?.teamName ?? "");
 
   const q = tasks.questions[idx];
   const answeredCount = Object.keys(answers).length;
 
   useEffect(() => {
     setText(answers[q?.id] ?? "");
+    setOptFilter("");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [idx]);
 
@@ -274,6 +375,8 @@ function TaskFlow({
         memberId={tasks.member.id}
         captain={tasks.captain}
         memberName={tasks.member.name}
+        teamName={teamName}
+        onRenamed={setTeamName}
         onBack={total > 0 ? () => { setStep("feud"); setIdx(total - 1); } : undefined}
         onDone={() => setStep("done")}
       />
@@ -295,9 +398,18 @@ function TaskFlow({
           Your host takes it from here.
         </p>
         {tasks.captain && (
-          <p className="mt-2 rounded-lg bg-gold/10 px-3 py-2 text-xs text-gold">
-            🎖️ Captain topics locked in for {tasks.captain.teamName}.
-          </p>
+          <div className="mt-2 rounded-lg bg-gold/10 px-3 py-2 text-xs text-gold">
+            🎖️ You&apos;re captain of <span className="font-semibold">{teamName}</span>.
+            <div className="mt-1">
+              <TeamNameEditor
+                code={code}
+                memberId={tasks.member.id}
+                teamId={tasks.captain.teamId}
+                name={teamName}
+                onRenamed={setTeamName}
+              />
+            </div>
+          </div>
         )}
         <div className="mt-5 flex justify-center gap-2">
           {total > 0 && (
@@ -337,31 +449,53 @@ function TaskFlow({
 
       <div className="mt-4">
         {q.type === "pick_person" && (
-          <div className="grid grid-cols-2 gap-2">
-            {tasks.roster.map((m) => (
-              <OptionButton
-                key={m.id}
-                label={m.name}
-                selected={selected === m.name}
-                onClick={() => saveAnswer(q.id, m.name)}
-                disabled={busy}
+          <div>
+            {tasks.roster.length > 8 && (
+              <input
+                value={optFilter}
+                onChange={(e) => setOptFilter(e.target.value)}
+                placeholder="Type a name to filter…"
+                className="input mb-2 text-sm"
               />
-            ))}
+            )}
+            <div className="grid grid-cols-2 gap-2">
+              {tasks.roster
+                .filter((m) => m.name.toLowerCase().includes(optFilter.trim().toLowerCase()))
+                .map((m) => (
+                  <OptionButton
+                    key={m.id}
+                    label={m.name}
+                    selected={selected === m.name}
+                    onClick={() => saveAnswer(q.id, m.name)}
+                    disabled={busy}
+                  />
+                ))}
+            </div>
           </div>
         )}
 
         {(q.type === "multiple_choice" || q.type === "likelihood") && (
           <div className="space-y-2">
-            {(q.options ?? []).map((o) => (
-              <OptionButton
-                key={o}
-                label={o}
-                selected={selected === o}
-                onClick={() => saveAnswer(q.id, o)}
-                disabled={busy}
-                wide
+            {(q.options ?? []).length > 8 && (
+              <input
+                value={optFilter}
+                onChange={(e) => setOptFilter(e.target.value)}
+                placeholder="Type to filter options…"
+                className="input text-sm"
               />
-            ))}
+            )}
+            {(q.options ?? [])
+              .filter((o) => o.toLowerCase().includes(optFilter.trim().toLowerCase()))
+              .map((o) => (
+                <OptionButton
+                  key={o}
+                  label={o}
+                  selected={selected === o}
+                  onClick={() => saveAnswer(q.id, o)}
+                  disabled={busy}
+                  wide
+                />
+              ))}
           </div>
         )}
 
@@ -435,6 +569,8 @@ function TopicPicker({
   memberId,
   captain,
   memberName,
+  teamName,
+  onRenamed,
   onBack,
   onDone,
 }: {
@@ -442,6 +578,8 @@ function TopicPicker({
   memberId: string;
   captain: { teamId: string; teamName: string; selected: string[] };
   memberName: string;
+  teamName: string;
+  onRenamed: (n: string) => void;
   onBack?: () => void;
   onDone: () => void;
 }) {
@@ -477,8 +615,18 @@ function TopicPicker({
         <div className="text-3xl">🎖️</div>
         <h1 className="mt-1 font-display text-xl font-bold">Captain {memberName}</h1>
         <p className="text-sm text-cream/60">
-          Pick <b className="text-cream">one topic per category</b> for {captain.teamName}.
+          Pick <b className="text-cream">one topic per category</b> for{" "}
+          <span className="font-semibold text-cream">{teamName}</span>.
         </p>
+        <div className="mt-1">
+          <TeamNameEditor
+            code={code}
+            memberId={memberId}
+            teamId={captain.teamId}
+            name={teamName}
+            onRenamed={onRenamed}
+          />
+        </div>
         <p className="mt-1 text-xs text-cream/45">
           {chosen.length}/{TOPIC_CATALOG.length} categories
         </p>

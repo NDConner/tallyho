@@ -7,7 +7,7 @@ import { InviteCard } from "@/components/InviteCard";
 import { CopyButton } from "@/components/CopyButton";
 import { RosterEditor } from "@/components/RosterEditor";
 import { GroupAdmin } from "@/components/GroupAdmin";
-import { addMember, generateTriviaBank, reshuffleTeams } from "./actions";
+import { addMember, generateTriviaBank, reshuffleTeams, addGuest, removeMember } from "./actions";
 import { startGame } from "@/app/play/actions";
 import type { Group, Member, Team } from "@/lib/types";
 
@@ -60,6 +60,18 @@ export default async function GroupPage({
   ]);
   const members = (memberData ?? []) as Member[];
   const teams = (teamData ?? []) as Team[];
+  // Players take turns & fill out; "answer-only" guests are just pickable names.
+  const players = members.filter((m) => m.is_playing !== false);
+  const guests = members.filter((m) => m.is_playing === false);
+
+  // Most recent game (for the end-of-game recap link).
+  const { data: latestGame } = await supabase
+    .from("games")
+    .select("id, status, created_at")
+    .eq("group_id", id)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
 
   const link = joinLink(group, appUrl());
   const hostReady = (assignCount ?? 0) > 0 && (triviaCount ?? 0) > 0;
@@ -93,7 +105,7 @@ export default async function GroupPage({
     for (const r of resp ?? []) answeredByMember.set(r.member_id, (answeredByMember.get(r.member_id) ?? 0) + 1);
     for (const a of asg ?? []) holdoutMembers.add(a.member_id);
   }
-  const memberProgress = members.map((m) => {
+  const memberProgress = players.map((m) => {
     const answered = answeredByMember.get(m.id) ?? 0;
     const target = Math.max(
       0,
@@ -138,8 +150,8 @@ export default async function GroupPage({
     {
       n: 2,
       label: "Members answer their questions",
-      done: members.length > 0 && doneCount >= members.length,
-      detail: `${doneCount}/${members.length} finished`,
+      done: players.length > 0 && doneCount >= players.length,
+      detail: `${doneCount}/${players.length} finished`,
     },
     { n: 3, label: "Captains pick trivia topics", done: (topicCount ?? 0) > 0, detail: `${topicCount ?? 0} chosen` },
     { n: 4, label: "Generate the trivia bank", done: (triviaCount ?? 0) > 0, detail: `${triviaCount ?? 0} questions` },
@@ -226,7 +238,7 @@ export default async function GroupPage({
             <div className="flex items-center justify-between">
               <h2 className="font-display text-lg font-bold">Who&apos;s filled out</h2>
               <span className="text-sm text-cream/50">
-                {doneCount}/{members.length} done
+                {doneCount}/{players.length} done
               </span>
             </div>
             {totalQuestions === 0 ? (
@@ -333,8 +345,8 @@ export default async function GroupPage({
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h2 className="font-display text-lg font-bold">Roster</h2>
               <div className="flex items-center gap-3">
-                <span className="text-sm text-cream/50">{members.length} players</span>
-                {teams.length > 1 && members.length > 0 && (
+                <span className="text-sm text-cream/50">{players.length} players</span>
+                {teams.length > 1 && players.length > 0 && (
                   <form action={reshuffleTeams}>
                     <input type="hidden" name="groupId" value={group.id} />
                     <button type="submit" className="btn btn-ghost text-xs">
@@ -345,10 +357,10 @@ export default async function GroupPage({
               </div>
             </div>
             <p className="mt-1 text-xs text-cream/45">
-              Move a player with the dropdown, tap ★ to make someone captain, or reshuffle to redraw
-              teams and captains at random.
+              Move a player with the dropdown, tap ★ to make someone captain, ✏️ to rename a team, or
+              reshuffle to redraw teams and captains at random.
             </p>
-            <RosterEditor groupId={group.id} members={members} teams={teams} />
+            <RosterEditor groupId={group.id} members={players} teams={teams} />
 
             {/* add member */}
             <form action={addMember} className="mt-4 flex flex-wrap items-end gap-2">
@@ -378,6 +390,53 @@ export default async function GroupPage({
                 Add
               </button>
             </form>
+
+            {/* answer-only names (not playing, but pickable) */}
+            <div className="mt-6 border-t border-white/10 pt-4">
+              <h3 className="font-display text-sm font-bold">Answer-only names</h3>
+              <p className="mt-0.5 text-xs text-cream/45">
+                Friends who won&apos;t be at game night but can still be picked as answers on
+                pick-a-person questions. They don&apos;t join, get a team, or take a turn.
+              </p>
+              {guests.length > 0 && (
+                <ul className="mt-2 flex flex-wrap gap-1.5">
+                  {guests.map((g) => (
+                    <li key={g.id}>
+                      <form action={removeMember}>
+                        <input type="hidden" name="groupId" value={group.id} />
+                        <input type="hidden" name="memberId" value={g.id} />
+                        <span className="chip cursor-default text-xs">
+                          {g.display_name}
+                          <button
+                            type="submit"
+                            className="ml-1 text-cream/40 hover:text-magenta"
+                            title="Remove"
+                            aria-label={`Remove ${g.display_name}`}
+                          >
+                            ✕
+                          </button>
+                        </span>
+                      </form>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <form action={addGuest} className="mt-3 flex flex-wrap items-end gap-2">
+                <input type="hidden" name="groupId" value={group.id} />
+                <div className="flex-1">
+                  <input
+                    name="name"
+                    className="input"
+                    placeholder="Add an answer-only name (a friend who can't make it)"
+                    maxLength={40}
+                    required
+                  />
+                </div>
+                <button type="submit" className="btn btn-ghost">
+                  Add name
+                </button>
+              </form>
+            </div>
           </section>
 
           {/* host */}
@@ -415,6 +474,20 @@ export default async function GroupPage({
               </p>
             )}
           </section>
+
+          {/* last game recap */}
+          {latestGame && (
+            <section className="card p-5">
+              <h2 className="font-display text-lg font-bold">Last game recap</h2>
+              <p className="mt-1 text-sm text-cream/55">
+                Stats, superlatives and a player card for everyone — a fun, shareable wrap-up of your
+                last game.
+              </p>
+              <a href={`/recap/${latestGame.id}`} className="btn btn-secondary mt-3 text-sm">
+                🎬 Open recap
+              </a>
+            </section>
+          )}
         </div>
 
         {/* right: invites */}

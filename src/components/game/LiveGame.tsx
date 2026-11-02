@@ -43,6 +43,7 @@ export interface LiveGamePayload {
   gameId: string;
   groupName: string;
   allOrNothingValue: number;
+  placePoints: number[]; // survey 1st/2nd/3rd point values (e.g. [3,2,1])
   settings: { feudSeconds: number; triviaSeconds: number };
   teams: TeamLite[];
   initialScores: Record<string, number>;
@@ -66,6 +67,7 @@ export function LiveGame(p: LiveGamePayload) {
   const [pending, setPending] = useState(false);
   const [paused, setPaused] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showScores, setShowScores] = useState(false);
 
   const [feudSeconds, setFeudSeconds] = useState(p.settings.feudSeconds);
   const [triviaSeconds, setTriviaSeconds] = useState(p.settings.triviaSeconds);
@@ -118,6 +120,7 @@ export function LiveGame(p: LiveGamePayload) {
     if (pending || phase !== "feud" || !turn) return;
     setPending(true);
     setPhase("feudReveal");
+    const who = { memberId: turn.memberId, memberName: turn.memberName, round: turn.round };
     try {
       if (turn.kind === "guess_who") {
         const res = await scoreGuessWho({
@@ -126,6 +129,7 @@ export function LiveGame(p: LiveGamePayload) {
           answerMemberId: turn.answerMemberId ?? "",
           teamId: turn.teamId,
           guess,
+          ...who,
         });
         setGuessRes(res);
         if (res.points > 0)
@@ -137,6 +141,7 @@ export function LiveGame(p: LiveGamePayload) {
           targetMemberId: turn.targetMemberId ?? "",
           teamId: turn.teamId,
           guess,
+          ...who,
         });
         setGuessRes(res);
         if (res.points > 0)
@@ -147,6 +152,7 @@ export function LiveGame(p: LiveGamePayload) {
           questionId: turn.feudQuestionId,
           teamId: turn.teamId,
           guess,
+          ...who,
         });
         setFeudRes(res);
         if (res.points > 0)
@@ -186,6 +192,10 @@ export function LiveGame(p: LiveGamePayload) {
         questionId: currentTrivia.id,
         teamId: turn.teamId,
         answer,
+        memberId: turn.memberId,
+        memberName: turn.memberName,
+        round: turn.round,
+        topic: currentTrivia.topic,
       });
       setTriviaRes(res);
       if (res.points > 0)
@@ -224,12 +234,19 @@ export function LiveGame(p: LiveGamePayload) {
   }
 
   // Host overrides on the reveal screens (fix a fuzzy-match dispute, etc.).
-  async function overrideFeud(bucketLabel: string, bucketCount: number) {
+  async function overrideFeud(bucketLabel: string, awardPoints: number) {
     if (!turn || !feudRes) return;
-    const delta = bucketCount - feudRes.points;
-    setFeudRes({ ...feudRes, matched: bucketLabel, points: bucketCount });
+    const delta = awardPoints - feudRes.points;
+    setFeudRes({ ...feudRes, matched: bucketLabel, points: awardPoints });
     setScores((s) => ({ ...s, [turn.teamId]: Math.max(0, (s[turn.teamId] ?? 0) + delta) }));
     await adjustScore({ gameId: p.gameId, teamId: turn.teamId, delta });
+  }
+
+  // Host score fix for any team at any time (e.g. a free-text answer the matcher
+  // didn't catch). Available from the ⚖ Scores panel in the top bar.
+  async function adjustTeam(teamId: string, delta: number) {
+    setScores((s) => ({ ...s, [teamId]: Math.max(0, (s[teamId] ?? 0) + delta) }));
+    await adjustScore({ gameId: p.gameId, teamId, delta });
   }
 
   async function overrideTrivia(makeCorrect: boolean) {
@@ -263,6 +280,7 @@ export function LiveGame(p: LiveGamePayload) {
         paused={paused}
         onPause={togglePause}
         onSettings={() => setShowSettings((s) => !s)}
+        onScores={() => setShowScores((s) => !s)}
         onExit={() => router.push(`/dashboard/g/${p.groupId}`)}
         phase={phase}
       />
@@ -275,6 +293,16 @@ export function LiveGame(p: LiveGamePayload) {
           triviaSeconds={triviaSeconds}
           onApply={applyTimers}
           onClose={() => setShowSettings(false)}
+        />
+      )}
+
+      {showScores && phase !== "over" && (
+        <ScoreAdjustPanel
+          teams={p.teams}
+          scores={scores}
+          step={p.allOrNothingValue}
+          onAdjust={adjustTeam}
+          onClose={() => setShowScores(false)}
         />
       )}
 
@@ -416,6 +444,7 @@ export function LiveGame(p: LiveGamePayload) {
             groupName={p.groupName}
             guess={guess}
             result={feudRes}
+            placePoints={p.placePoints}
             pending={pending}
             onOverride={overrideFeud}
             onContinue={continueToTrivia}
@@ -468,7 +497,9 @@ export function LiveGame(p: LiveGamePayload) {
         )}
 
         {/* OVER */}
-        {phase === "over" && <GameOver teams={p.teams} scores={scores} groupId={p.groupId} />}
+        {phase === "over" && (
+          <GameOver teams={p.teams} scores={scores} groupId={p.groupId} gameId={p.gameId} />
+        )}
       </div>
     </div>
   );
@@ -496,6 +527,7 @@ function TopBar({
   paused,
   onPause,
   onSettings,
+  onScores,
   onExit,
   phase,
 }: {
@@ -507,6 +539,7 @@ function TopBar({
   paused: boolean;
   onPause: () => void;
   onSettings: () => void;
+  onScores: () => void;
   onExit: () => void;
   phase: Phase;
 }) {
@@ -521,6 +554,9 @@ function TopBar({
           <>
             <button onClick={onPause} className="btn btn-ghost px-3 py-1.5 text-xs">
               {paused ? "▶ Resume" : "⏸ Pause"}
+            </button>
+            <button onClick={onScores} className="btn btn-ghost px-3 py-1.5 text-xs">
+              ⚖ Scores
             </button>
             <button onClick={onSettings} className="btn btn-ghost px-3 py-1.5 text-xs">
               ⚙ Timers
@@ -593,6 +629,7 @@ function FeudRevealPanel({
   groupName,
   guess,
   result,
+  placePoints,
   pending,
   onOverride,
   onContinue,
@@ -600,8 +637,9 @@ function FeudRevealPanel({
   groupName: string;
   guess: string;
   result: FeudResult | null;
+  placePoints: number[];
   pending: boolean;
-  onOverride: (label: string, count: number) => void;
+  onOverride: (label: string, awardPoints: number) => void;
   onContinue: () => void;
 }) {
   if (!result) {
@@ -613,8 +651,10 @@ function FeudRevealPanel({
     );
   }
   const total = result.buckets.reduce((s, b) => s + b.count, 0);
+  const top = placePoints[0] ?? 0;
   const points = result.points;
-  const taglineBucket = points === 0 ? "feudMiss" : points >= 3 ? "feudBigHit" : "feudSmallHit";
+  const taglineBucket = points === 0 ? "feudMiss" : points >= top ? "feudBigHit" : "feudSmallHit";
+  const ordinals = ["1st", "2nd", "3rd"];
   return (
     <div className="w-full max-w-2xl text-center">
       <SaysReveal groupName={groupName} size="lg" />
@@ -630,14 +670,15 @@ function FeudRevealPanel({
         )}
       </p>
       <div className="mt-4 space-y-2">
-        {result.buckets.map((b) => {
+        {result.buckets.map((b, i) => {
           const matched = result.matched?.toLowerCase() === b.label.toLowerCase();
+          const award = placePoints[i] ?? 0;
           return (
             <button
               key={b.label}
-              onClick={() => onOverride(b.label, b.count)}
+              onClick={() => onOverride(b.label, award)}
               disabled={pending}
-              title="Tap to award this answer (host override)"
+              title="Tap to award this answer to the team (host override)"
               className={cn(
                 "animate-flip-in relative w-full overflow-hidden rounded-xl border px-4 py-3 text-left transition hover:border-gold/70",
                 matched ? "border-gold bg-gold/10" : "border-white/10 bg-white/5",
@@ -647,9 +688,23 @@ function FeudRevealPanel({
                 className="absolute inset-y-0 left-0 bg-white/5"
                 style={{ width: `${total ? (b.count / total) * 100 : 0}%` }}
               />
-              <div className="relative flex items-center justify-between">
-                <span className="font-semibold">{b.label}</span>
-                <span className="font-display text-xl font-black">{b.count}</span>
+              <div className="relative flex items-center justify-between gap-3">
+                <span className="flex items-center gap-2 font-semibold">
+                  {i < 3 && (
+                    <span className="rounded-md bg-white/10 px-1.5 py-0.5 text-[0.65rem] font-bold text-cream/70">
+                      {ordinals[i]}
+                    </span>
+                  )}
+                  {b.label}
+                </span>
+                <span className="flex items-center gap-3">
+                  <span className="text-xs text-cream/45">
+                    {b.count} said
+                  </span>
+                  <span className={cn("font-display text-xl font-black", award > 0 ? "text-gold" : "text-cream/35")}>
+                    +{award}
+                  </span>
+                </span>
               </div>
             </button>
           );
@@ -666,7 +721,10 @@ function FeudRevealPanel({
           )}
         </div>
         <p className="mt-1 text-cream/60">{pickTagline(taglineBucket, total)}</p>
-        <p className="mt-1 text-xs text-cream/40">Wrong match? Tap the answer they meant.</p>
+        <p className="mt-1 text-xs text-cream/40">
+          Top answer +{placePoints[0] ?? 0}, 2nd +{placePoints[1] ?? 0}, 3rd +{placePoints[2] ?? 0}.
+          Wrong match? Tap the answer they meant.
+        </p>
       </div>
       <button onClick={onContinue} disabled={pending} className="btn btn-secondary mt-6 text-lg">
         On to trivia →
@@ -799,10 +857,12 @@ function GameOver({
   teams,
   scores,
   groupId,
+  gameId,
 }: {
   teams: TeamLite[];
   scores: Record<string, number>;
   groupId: string;
+  gameId: string;
 }) {
   const ranked = [...teams].sort((a, b) => (scores[b.id] ?? 0) - (scores[a.id] ?? 0));
   const top = ranked[0];
@@ -831,9 +891,12 @@ function GameOver({
         ))}
       </div>
       <div className="mt-8 flex flex-wrap justify-center gap-3">
+        <a href={`/recap/${gameId}`} className="btn btn-primary text-lg">
+          🎬 See the recap
+        </a>
         <form action={startNextRound}>
           <input type="hidden" name="groupId" value={groupId} />
-          <button type="submit" className="btn btn-primary">
+          <button type="submit" className="btn btn-secondary">
             🔄 Play another round
           </button>
         </form>
@@ -842,7 +905,8 @@ function GameOver({
         </a>
       </div>
       <p className="mt-3 text-xs text-cream/40">
-        Another round reshuffles feud questions and generates fresh trivia.
+        The recap has every stat, superlative and player card — easy to share. Another round
+        reshuffles feud questions and generates fresh trivia.
       </p>
     </div>
   );
@@ -902,6 +966,63 @@ function SettingsPanel({
       >
         Apply (takes effect next turn)
       </button>
+    </div>
+  );
+}
+
+function ScoreAdjustPanel({
+  teams,
+  scores,
+  step,
+  onAdjust,
+  onClose,
+}: {
+  teams: TeamLite[];
+  scores: Record<string, number>;
+  step: number;
+  onAdjust: (teamId: string, delta: number) => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="card mt-3 p-4">
+      <div className="flex items-center justify-between">
+        <h3 className="font-display font-bold">Fix scores</h3>
+        <button onClick={onClose} className="text-cream/50 hover:text-cream" aria-label="Close">
+          ✕
+        </button>
+      </div>
+      <p className="mt-1 text-xs text-cream/50">
+        Nudge any team if the auto-scoring got something wrong — handy when a free-text answer
+        wasn&apos;t recognized. Changes save immediately.
+      </p>
+      <div className="mt-3 space-y-2">
+        {teams.map((t) => (
+          <div
+            key={t.id}
+            className="flex items-center justify-between gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2"
+          >
+            <div className="flex min-w-0 items-center gap-2">
+              <span className={cn("h-2.5 w-2.5 rounded-full", TEAM_BG[t.index % TEAM_BG.length])} />
+              <span className="truncate text-sm font-semibold">{t.name}</span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <button onClick={() => onAdjust(t.id, -step)} className="btn btn-ghost px-2 py-1 text-xs">
+                −{step}
+              </button>
+              <button onClick={() => onAdjust(t.id, -1)} className="btn btn-ghost px-2 py-1 text-xs">
+                −1
+              </button>
+              <span className="w-9 text-center font-display text-xl font-black">{scores[t.id] ?? 0}</span>
+              <button onClick={() => onAdjust(t.id, 1)} className="btn btn-ghost px-2 py-1 text-xs">
+                +1
+              </button>
+              <button onClick={() => onAdjust(t.id, step)} className="btn btn-ghost px-2 py-1 text-xs">
+                +{step}
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

@@ -17,7 +17,12 @@ export default async function QuestionsPage({ params }: { params: Promise<{ id: 
 
   const [{ data: qData }, { data: memberData }] = await Promise.all([
     supabase.from("feud_questions").select("*").eq("group_id", id).order("created_at"),
-    supabase.from("members").select("id, display_name").eq("group_id", id).order("created_at"),
+    supabase
+      .from("members")
+      .select("id, display_name")
+      .eq("group_id", id)
+      .eq("is_playing", true)
+      .order("created_at"),
   ]);
   const qs = (qData ?? []) as FeudQuestion[];
   const members = (memberData ?? []).map((m) => ({ id: m.id, name: m.display_name }));

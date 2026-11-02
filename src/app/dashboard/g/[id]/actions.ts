@@ -28,7 +28,8 @@ export async function addMember(formData: FormData) {
     const { data: members } = await supabase
       .from("members")
       .select("team_id")
-      .eq("group_id", groupId);
+      .eq("group_id", groupId)
+      .eq("is_playing", true);
     const { data: teams } = await supabase
       .from("teams")
       .select("id")
@@ -148,7 +149,7 @@ export async function reshuffleTeams(formData: FormData) {
 
   const [{ data: teams }, { data: members }] = await Promise.all([
     supabase.from("teams").select("id").eq("group_id", groupId).order("team_index"),
-    supabase.from("members").select("id").eq("group_id", groupId),
+    supabase.from("members").select("id").eq("group_id", groupId).eq("is_playing", true),
   ]);
   if (!teams || teams.length === 0 || !members || members.length === 0) return;
 
@@ -182,4 +183,55 @@ export async function generateTriviaBank(formData: FormData) {
   await ensureAllHoldouts(supabase, groupId);
   await regenerateTriviaBank(supabase, groupId);
   revalidatePath(`/dashboard/g/${groupId}`);
+}
+
+/**
+ * Add an "answer-only" name: someone in the friend group who should be pickable
+ * on pick-a-person questions but won't be at game night. They get no team, no
+ * join, no fill-out, and never take a turn.
+ */
+export async function addGuest(formData: FormData) {
+  const groupId = String(formData.get("groupId") || "");
+  const name = String(formData.get("name") || "").trim();
+  if (!groupId || !name) return;
+  const supabase = await createSupabaseServerClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return;
+  await supabase.from("members").insert({
+    group_id: groupId,
+    display_name: name,
+    is_playing: false,
+    is_captain: false,
+    team_id: null,
+  });
+  revalidatePath(`/dashboard/g/${groupId}`);
+}
+
+/** Remove a member — a player or an answer-only guest. Cascades their answers. */
+export async function removeMember(formData: FormData) {
+  const groupId = String(formData.get("groupId") || "");
+  const memberId = String(formData.get("memberId") || "");
+  if (!groupId || !memberId) return;
+  const supabase = await createSupabaseServerClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return;
+  await supabase.from("members").delete().eq("id", memberId);
+  revalidatePath(`/dashboard/g/${groupId}`);
+}
+
+/** Rename a team (host side; captains can also rename their own team in /join). */
+export async function renameTeam(input: { groupId: string; teamId: string; name: string }) {
+  const name = input.name.trim();
+  if (!input.groupId || !input.teamId || !name) return;
+  const supabase = await createSupabaseServerClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return;
+  await supabase.from("teams").update({ name }).eq("id", input.teamId).eq("group_id", input.groupId);
+  revalidatePath(`/dashboard/g/${input.groupId}`);
 }

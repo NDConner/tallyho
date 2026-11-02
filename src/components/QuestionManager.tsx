@@ -33,7 +33,7 @@ const TYPE_META: Record<
   { label: string; hint: string; hasOptions: boolean }
 > = {
   pick_person: { label: "Pick a person", hint: "Answers are group members — cleanest tally.", hasOptions: false },
-  multiple_choice: { label: "Multiple choice", hint: "Give 2–6 options.", hasOptions: true },
+  multiple_choice: { label: "Multiple choice", hint: "Give 2–20 options.", hasOptions: true },
   likelihood: { label: "Likelihood", hint: "A scale, e.g. Never → Always.", hasOptions: true },
   open_text: { label: "Open text", hint: "Free text, clustered into buckets.", hasOptions: false },
   guess_who: {
@@ -81,6 +81,7 @@ export function QuestionManager({
   const [pending, start] = useTransition();
   const [editingId, setEditingId] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
+  const [guidance, setGuidance] = useState("");
   const target = Math.ceil(memberCount * 1.5) + 3;
   const nameById = new Map(members.map((m) => [m.id, m.name]));
 
@@ -111,6 +112,7 @@ export function QuestionManager({
     start(async () => {
       const fd = new FormData();
       fd.set("groupId", groupId);
+      fd.set("guidance", guidance);
       await action(fd);
       router.refresh();
     });
@@ -118,43 +120,58 @@ export function QuestionManager({
 
   return (
     <div className="space-y-5">
-      <div className="card flex flex-wrap items-center justify-between gap-3 p-5">
-        <div>
-          <div className="font-display text-lg font-bold">
-            {questions.length} question{questions.length === 1 ? "" : "s"}
+      <div className="card space-y-3 p-5">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <div className="font-display text-lg font-bold">
+              {questions.length} question{questions.length === 1 ? "" : "s"}
+            </div>
+            <p className="text-sm text-cream/55">
+              For {memberCount} players, aim for <span className="text-cream">~{target}+</span> so
+              everyone can get a fresh question they didn&apos;t answer.
+            </p>
           </div>
-          <p className="text-sm text-cream/55">
-            For {memberCount} players, aim for <span className="text-cream">~{target}+</span> so
-            everyone can get a fresh question they didn&apos;t answer.
-          </p>
+          <div className="flex flex-wrap gap-2">
+            <button
+              onClick={() => {
+                if (
+                  questions.length === 0 ||
+                  confirm("Replace ALL current questions with a fresh suggested list?")
+                )
+                  runAction(suggestNewList);
+              }}
+              className="btn btn-ghost text-sm"
+              disabled={pending}
+            >
+              ✨ Suggest a new list
+            </button>
+            <button
+              onClick={() => runAction(suggestMore)}
+              className="btn btn-secondary text-sm"
+              disabled={pending}
+            >
+              ➕ Add 10 more
+            </button>
+            <button
+              onClick={() => { setAdding(true); setEditingId(null); }}
+              className="btn btn-primary text-sm"
+            >
+              + Add question
+            </button>
+          </div>
         </div>
-        <div className="flex flex-wrap gap-2">
-          <button
-            onClick={() => {
-              if (
-                questions.length === 0 ||
-                confirm("Replace ALL current questions with a fresh suggested list?")
-              )
-                runAction(suggestNewList);
-            }}
-            className="btn btn-ghost text-sm"
-            disabled={pending}
-          >
-            ✨ Suggest a new list
-          </button>
-          <button
-            onClick={() => runAction(suggestMore)}
-            className="btn btn-secondary text-sm"
-            disabled={pending}
-          >
-            ➕ Add 10 more
-          </button>
-          <button
-            onClick={() => { setAdding(true); setEditingId(null); }}
-            className="btn btn-primary text-sm"
-          >
-            + Add question
-          </button>
+        <div>
+          <input
+            className="input text-sm"
+            value={guidance}
+            onChange={(e) => setGuidance(e.target.value)}
+            placeholder="Guide new suggestions (optional): e.g. “lean into our Tahoe trips and inside jokes”"
+            maxLength={200}
+          />
+          <p className="mt-1 text-xs text-cream/40">
+            Steers <span className="text-cream/60">✨ Suggest a new list</span> and{" "}
+            <span className="text-cream/60">➕ Add 10 more</span> when AI suggestions are on.
+          </p>
         </div>
       </div>
 
@@ -352,7 +369,7 @@ function QuestionForm({
               </button>
             </div>
           ))}
-          {options.length < 6 && (
+          {options.length < 20 && (
             <button type="button" onClick={() => setOptions((arr) => [...arr, ""])} className="btn btn-ghost text-xs">
               + Option
             </button>
