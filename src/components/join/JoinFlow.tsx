@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { Wordmark } from "@/components/Wordmark";
 
 interface MemberLite {
@@ -217,11 +217,24 @@ export function JoinFlow({ initialCode }: { initialCode?: string }) {
 function TaskRouter({ code, tasks, onSwitchUser }: { code: string; tasks: Tasks; onSwitchUser: () => void }) {
   const [view, setView] = useState<"hub" | "questions" | "done">(tasks.captain ? "hub" : "questions");
 
+  // Answers live HERE, not inside QuestionFlow, so they survive the
+  // unmount/remount when the member jumps to the hub/done card and back to
+  // "Review answers". Seeded once from whatever was already saved on the server.
+  const [answers, setAnswers] = useState<Record<string, string>>(() => {
+    const init: Record<string, string> = {};
+    for (const q of tasks.questions) if (q.answer != null && q.answer.trim()) init[q.id] = q.answer;
+    return init;
+  });
+  const answeredCount = tasks.questions.reduce((n, q) => n + (answers[q.id]?.trim() ? 1 : 0), 0);
+
   if (view === "questions") {
     return (
       <QuestionFlow
         code={code}
         tasks={tasks}
+        answers={answers}
+        setAnswers={setAnswers}
+        answeredCount={answeredCount}
         onSwitchUser={onSwitchUser}
         onBack={tasks.captain ? () => setView("hub") : undefined}
         onDone={() => setView(tasks.captain ? "hub" : "done")}
@@ -230,15 +243,33 @@ function TaskRouter({ code, tasks, onSwitchUser }: { code: string; tasks: Tasks;
   }
 
   if (view === "hub" && tasks.captain) {
-    return <CaptainHub code={code} tasks={tasks} onAnswer={() => setView("questions")} onSwitchUser={onSwitchUser} />;
+    return (
+      <CaptainHub
+        code={code}
+        tasks={tasks}
+        answeredCount={answeredCount}
+        onAnswer={() => setView("questions")}
+        onSwitchUser={onSwitchUser}
+      />
+    );
   }
 
   // Non-captain finished.
-  return <DoneCard tasks={tasks} onReview={() => setView("questions")} onSwitchUser={onSwitchUser} />;
+  return <DoneCard tasks={tasks} answeredCount={answeredCount} onReview={() => setView("questions")} onSwitchUser={onSwitchUser} />;
 }
 
-function DoneCard({ tasks, onReview, onSwitchUser }: { tasks: Tasks; onReview: () => void; onSwitchUser: () => void }) {
-  const done = tasks.total === 0 || tasks.answeredCount >= tasks.total;
+function DoneCard({
+  tasks,
+  answeredCount,
+  onReview,
+  onSwitchUser,
+}: {
+  tasks: Tasks;
+  answeredCount: number;
+  onReview: () => void;
+  onSwitchUser: () => void;
+}) {
+  const done = tasks.total === 0 || answeredCount >= tasks.total;
   const dl = prettyDate(tasks.answerDeadline);
   return (
     <div className="card p-7 text-center">
@@ -247,7 +278,7 @@ function DoneCard({ tasks, onReview, onSwitchUser }: { tasks: Tasks; onReview: (
         {done ? `All set, ${tasks.member.name}!` : `Thanks, ${tasks.member.name}!`}
       </h1>
       <p className="mt-2 text-sm text-cream/60">
-        {tasks.total > 0 ? `You answered ${tasks.answeredCount} of ${tasks.total}.` : "You're all squared away."}{" "}
+        {tasks.total > 0 ? `You answered ${answeredCount} of ${tasks.total}.` : "You're all squared away."}{" "}
         Your host takes it from here.
       </p>
       {dl && !done && <p className="mt-2 text-xs text-gold">⏰ Try to finish by {dl}.</p>}
@@ -270,11 +301,13 @@ function DoneCard({ tasks, onReview, onSwitchUser }: { tasks: Tasks; onReview: (
 function CaptainHub({
   code,
   tasks,
+  answeredCount,
   onAnswer,
   onSwitchUser,
 }: {
   code: string;
   tasks: Tasks;
+  answeredCount: number;
   onAnswer: () => void;
   onSwitchUser: () => void;
 }) {
@@ -282,7 +315,7 @@ function CaptainHub({
   const [teamName, setTeamName] = useState(cap.teamName);
   const [logoUrl, setLogoUrl] = useState<string | null>(cap.logoUrl);
   const [selected, setSelected] = useState<{ name: string; category: string }[]>(cap.selected);
-  const myDone = tasks.total === 0 || tasks.answeredCount >= tasks.total;
+  const myDone = tasks.total === 0 || answeredCount >= tasks.total;
   const dl = prettyDate(tasks.answerDeadline);
   const gd = prettyDate(tasks.gameDate);
 
@@ -361,7 +394,7 @@ function CaptainHub({
       {/* 4) Answer your own */}
       <div className="mt-4">
         <button onClick={onAnswer} className="btn btn-primary w-full">
-          {myDone ? "✓ Review my questions" : `4 · Answer my questions (${tasks.answeredCount}/${tasks.total}) →`}
+          {myDone ? "✓ Review my questions" : `4 · Answer my questions (${answeredCount}/${tasks.total}) →`}
         </button>
         <button onClick={onSwitchUser} className="mt-2 w-full text-center text-xs text-cream/45 hover:text-cream">
           I&apos;m someone else
@@ -636,31 +669,36 @@ function TeamNameEditor({
 function QuestionFlow({
   code,
   tasks,
+  answers,
+  setAnswers,
+  answeredCount,
   onSwitchUser,
   onBack,
   onDone,
 }: {
   code: string;
   tasks: Tasks;
+  answers: Record<string, string>;
+  setAnswers: Dispatch<SetStateAction<Record<string, string>>>;
+  answeredCount: number;
   onSwitchUser: () => void;
   onBack?: () => void;
   onDone: () => void;
 }) {
   const total = tasks.questions.length;
-  const [answers, setAnswers] = useState<Record<string, string>>(() => {
-    const init: Record<string, string> = {};
-    for (const q of tasks.questions) if (q.answer != null) init[q.id] = q.answer;
-    return init;
-  });
-  const [idx, setIdx] = useState(() => {
-    const firstUn = tasks.questions.findIndex((q) => q.answer == null);
-    return firstUn === -1 ? 0 : firstUn;
-  });
-  const [text, setText] = useState(answers[tasks.questions[0]?.id] ?? "");
+  // Open on the first still-unanswered question. If everything is already
+  // answered (e.g. the member tapped "Review answers"), start at the top with
+  // every saved pick shown. A question with no saved answer starts blank.
+  const initialIdx = (() => {
+    const f = tasks.questions.findIndex((qq) => !answers[qq.id]?.trim());
+    return f === -1 ? 0 : f;
+  })();
+  const [idx, setIdx] = useState(initialIdx);
+  const [text, setText] = useState(answers[tasks.questions[initialIdx]?.id] ?? "");
   const [optFilter, setOptFilter] = useState("");
+  const [failed, setFailed] = useState<Record<string, boolean>>({});
 
   const q = tasks.questions[idx];
-  const answeredCount = Object.keys(answers).length;
 
   useEffect(() => {
     setText(answers[q?.id] ?? "");
@@ -672,15 +710,27 @@ function QuestionFlow({
     if (typeof window !== "undefined") window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
+  // The optimistic update keeps the pick on screen immediately AND in the
+  // lifted state, so it survives leaving for the hub/done card and coming back
+  // to review. The network write runs in the background with one retry; a hard
+  // failure flags the question so an answer is never silently dropped.
   function saveAnswer(qid: string, value: string) {
-    if (!value.trim()) return;
-    setAnswers((a) => ({ ...a, [qid]: value })); // optimistic highlight
-    // Fire-and-forget so taps feel instant (no button disabling).
-    void fetch("/api/join/answer", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ code, memberId: tasks.member.id, questionId: qid, answer: value }),
-    });
+    const v = value.trim();
+    if (!v) return;
+    setAnswers((a) => (a[qid] === v ? a : { ...a, [qid]: v }));
+    setFailed((f) => (f[qid] ? { ...f, [qid]: false } : f));
+    const body = JSON.stringify({ code, memberId: tasks.member.id, questionId: qid, answer: v });
+    const once = () =>
+      fetch("/api/join/answer", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+      }).then((r) => {
+        if (!r.ok) throw new Error(String(r.status));
+      });
+    void once()
+      .catch(() => once()) // one retry for a transient blip
+      .catch(() => setFailed((f) => ({ ...f, [qid]: true })));
   }
 
   function goPrev() {
@@ -745,6 +795,17 @@ function QuestionFlow({
       </div>
 
       <div className="px-5 pb-5 pt-4">
+        {failed[q.id] && (
+          <p className="mb-3 flex items-center justify-between gap-2 rounded-lg bg-magenta/10 px-3 py-2 text-xs text-magenta-soft">
+            <span>⚠ Couldn&apos;t save that one.</span>
+            <button
+              onClick={() => saveAnswer(q.id, answers[q.id] ?? text)}
+              className="font-semibold underline hover:text-cream"
+            >
+              Retry
+            </button>
+          </p>
+        )}
         {typeHint(q.type) && (
           <p className="mb-3 rounded-lg bg-cyan/10 px-3 py-2 text-xs text-cyan">{typeHint(q.type)}</p>
         )}
