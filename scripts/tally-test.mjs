@@ -73,6 +73,28 @@ const CONSENSUS = ["pick_person", "likelihood", "multiple_choice", "open_text"];
 // Varied personal answers so "whose answer?" has distinct things to guess.
 const WHO_ANSWERS = ["Taylor Swift", "Kendrick Lamar", "Fleetwood Mac", "Beyoncé", "The Beatles", "Zach Bryan", "Daft Punk", "Dolly Parton", "Bad Bunny", "Radiohead", "SZA", "Prince"];
 const FMK_ANSWERS = ["Marry the chef, kiss the pilot, skip the DJ", "Marry Gosling, kiss Pascal, pass on the rest", "Honestly? Marry all three"];
+// Context-appropriate pools so "whose answer?" / open-text fills read naturally.
+const ATHLETES = ["LeBron James", "Serena Williams", "Lionel Messi", "Patrick Mahomes", "Simone Biles", "Shohei Ohtani", "Caitlin Clark", "Mikaela Shiffrin", "Tom Brady", "Steph Curry", "Alex Morgan", "Nikola Jokić"];
+const CRUSHES = ["Zendaya", "Pedro Pascal", "Margot Robbie", "Ryan Gosling", "Timothée Chalamet", "Sydney Sweeney", "Jacob Elordi", "Florence Pugh", "Henry Cavill", "Anya Taylor-Joy", "Paul Mescal", "Dua Lipa"];
+const BOOKS = ["Dune — a desert war over a rare spice", "The Alchemist — chasing your dream", "1984 — Big Brother is watching", "The Great Gatsby — the American dream", "Educated — a memoir of escape", "Project Hail Mary — a lone astronaut", "East of Eden — a sprawling family saga", "The Hobbit — there and back again"];
+const OPEN_EVENT = ["The cabin trip", "Opening day at A-Basin", "Last year's festival", "Friendsgiving", "The Moab trip", "NYE in the mountains"];
+const OPEN_CITY = ["Denver", "Barcelona", "Tokyo", "Lisbon", "New York", "Chamonix", "Queenstown"];
+const OPEN_SPORT = ["Skiing", "Soccer", "Basketball", "Climbing", "Golf", "Volleyball", "Hockey"];
+const TEAM_NAMES = ["Powder Hounds", "Summit Squad", "Après Crew", "Gondola Gang", "Peak Baggers", "Snow Bunnies"];
+function poolForWho(prompt) {
+  const p = (prompt || "").toLowerCase();
+  if (p.includes("athlete")) return ATHLETES;
+  if (p.includes("crush")) return CRUSHES;
+  if (p.includes("book")) return BOOKS;
+  return WHO_ANSWERS; // music artist / default
+}
+function poolForOpen(prompt) {
+  const p = (prompt || "").toLowerCase();
+  if (p.includes("event")) return OPEN_EVENT;
+  if (p.includes("city")) return OPEN_CITY;
+  if (p.includes("sport")) return OPEN_SPORT;
+  return OPEN_BUCKETS;
+}
 
 // ---------------------------------------------------------------- commands
 async function cmdList() {
@@ -137,7 +159,7 @@ async function cmdClone(srcName, newName) {
   const teamMap = new Map(srcTeams.map((t, i) => [t.id, newTeams[i].id]));
   const newMembers = await insert("members", srcMembers.map((m) => ({
     group_id: group.id, display_name: m.display_name, is_captain: m.is_captain,
-    team_id: m.team_id ? teamMap.get(m.team_id) : null,
+    is_playing: m.is_playing, team_id: m.team_id ? teamMap.get(m.team_id) : null,
   })));
   // remap captains on teams
   const nameToNew = new Map(newMembers.map((m) => [m.team_id + "|" + m.display_name, m.id]));
@@ -168,12 +190,8 @@ async function cmdClone(srcName, newName) {
   console.log(`Next:  node scripts/tally-test.mjs fill "${newName}"`);
 }
 
-function answersFor(question, n) {
-  let pool;
-  if (question.type === "pick_person") pool = question._names;
-  else if (question.type === "open_text") pool = shuffle(OPEN_BUCKETS).slice(0, 3);
-  else pool = (question.options && question.options.length ? question.options : ["Yes", "No", "Maybe"]);
-  pool = shuffle(pool);
+function answersForPool(pool, n) {
+  pool = shuffle(pool && pool.length ? pool : ["Yes", "No", "Maybe"]);
   const winner = pool[0], runner = pool[1] ?? pool[0];
   const out = [];
   for (let i = 0; i < Math.ceil(n * 0.55); i++) out.push(winner);
@@ -184,38 +202,48 @@ function answersFor(question, n) {
 
 async function cmdFill(name) {
   const group = await findGroup(name);
-  const members = await get(`members?group_id=eq.${group.id}&select=id,display_name,team_id,is_captain&order=created_at`);
-  const teams = await get(`teams?group_id=eq.${group.id}&select=id&order=team_index`);
-  const questions = await get(`feud_questions?group_id=eq.${group.id}&select=id,type,options,target_member_id&order=created_at`);
+  const members = await get(`members?group_id=eq.${group.id}&select=id,display_name,team_id,is_captain,is_playing&order=created_at`);
+  const teams = await get(`teams?group_id=eq.${group.id}&select=id,name&order=team_index`);
+  const questions = await get(`feud_questions?group_id=eq.${group.id}&select=id,prompt,type,options,target_member_id&order=created_at`);
+
+  // Only real players fill out; answer-only guests are pickable but never answer.
+  const players = members.filter((m) => m.is_playing !== false);
+  const guestNames = members.filter((m) => m.is_playing === false).map((m) => m.display_name);
+  const playerNames = players.map((m) => m.display_name);
+  // pick-a-person pool: players weighted 2x, guests sprinkled in (so guests tally too).
+  const pickPool = [...playerNames, ...playerNames, ...guestNames];
+
   const consensus = questions.filter((q) => CONSENSUS.includes(q.type));
-  if (consensus.length < members.length)
-    console.log(`  (heads up: ${consensus.length} consensus questions for ${members.length} players — some won't get a holdout)`);
-  const names = members.map((m) => m.display_name);
+  if (consensus.length < players.length)
+    console.log(`  (heads up: ${consensus.length} consensus questions for ${players.length} players — some won't get a holdout)`);
 
   // wipe prior test state
   const qids = questions.map((q) => q.id);
   if (qids.length) await del(`feud_responses?question_id=in.(${qids.join(",")})`);
   await del(`feud_question_assignments?group_id=eq.${group.id}`);
 
-  // distinct holdout per member (consensus questions only)
+  // distinct holdout per PLAYER (consensus questions only)
   const cshuf = shuffle(consensus);
   const holdout = new Map();
-  members.forEach((m, i) => { if (i < cshuf.length) holdout.set(m.id, cshuf[i].id); });
-  const asg = members.filter((m) => holdout.has(m.id)).map((m) => ({ group_id: group.id, question_id: holdout.get(m.id), member_id: m.id }));
+  players.forEach((m, i) => { if (i < cshuf.length) holdout.set(m.id, cshuf[i].id); });
+  const asg = players.filter((m) => holdout.has(m.id)).map((m) => ({ group_id: group.id, question_id: holdout.get(m.id), member_id: m.id }));
   if (asg.length) await insert("feud_question_assignments", asg);
 
   const responses = [];
-  // consensus: everyone answers all-but-their-holdout, with clear plurality
+  // consensus: every player answers all-but-their-holdout, with a clear plurality
   for (const q of consensus) {
-    q._names = names;
-    const answerers = members.filter((m) => holdout.get(m.id) !== q.id);
-    const ans = answersFor(q, answerers.length);
+    const pool =
+      q.type === "pick_person" ? pickPool
+      : q.type === "open_text" ? poolForOpen(q.prompt)
+      : (q.options && q.options.length ? q.options : ["Yes", "No", "Maybe"]);
+    const answerers = players.filter((m) => holdout.get(m.id) !== q.id);
+    const ans = answersForPool(pool, answerers.length);
     answerers.forEach((m, i) => responses.push({ question_id: q.id, member_id: m.id, raw_answer: ans[i], normalized_bucket: ans[i] }));
   }
-  // guess_who: everyone answers a distinct-ish personal answer
-  const whoPool = shuffle(WHO_ANSWERS);
+  // guess_who: every player gives a context-appropriate personal answer (varied to guess)
   for (const q of questions.filter((q) => q.type === "guess_who")) {
-    members.forEach((m, i) => { const a = whoPool[i % whoPool.length]; responses.push({ question_id: q.id, member_id: m.id, raw_answer: a, normalized_bucket: a }); });
+    const pool = shuffle(poolForWho(q.prompt));
+    players.forEach((m, i) => { const a = pool[i % pool.length]; responses.push({ question_id: q.id, member_id: m.id, raw_answer: a, normalized_bucket: a }); });
   }
   // guess_what: only the hand-picked target answers
   for (const q of questions.filter((q) => q.type === "guess_what" && q.target_member_id)) {
@@ -224,7 +252,11 @@ async function cmdFill(name) {
   }
   for (let i = 0; i < responses.length; i += 500) await insert("feud_responses", responses.slice(i, i + 500));
 
-  // captains pick one topic per category, per team
+  // captains "create" team names (only if still generic "Team N") + pick one topic per category
+  const tn = shuffle(TEAM_NAMES);
+  for (let i = 0; i < teams.length; i++) {
+    if (/^team \d+$/i.test(teams[i].name)) await patch(`teams?id=eq.${teams[i].id}`, { name: tn[i % tn.length] });
+  }
   await del(`trivia_topics?group_id=eq.${group.id}`);
   const topicRows = [];
   for (const t of teams) {
@@ -233,13 +265,15 @@ async function cmdFill(name) {
   await insert("trivia_topics", topicRows);
 
   await patch(`groups?id=eq.${group.id}`, { status: "setup" });
-  console.log(`Filled "${name}" (${group.join_code}): ${responses.length} answers across ${members.length} players, holdout each, ${topicRows.length} topics picked.`);
+  console.log(`Filled "${name}" (${group.join_code}): ${responses.length} answers across ${players.length} players (+${guestNames.length} answer-only names), holdout each, ${topicRows.length} topics picked.`);
   console.log(`In the app: open this group -> click "⚡ Generate trivia bank" -> "▶ Host live game".`);
 }
 
 async function cmdStatus(name) {
   const group = await findGroup(name);
-  const members = await get(`members?group_id=eq.${group.id}&select=id,display_name,is_captain&order=created_at`);
+  const allMembers = await get(`members?group_id=eq.${group.id}&select=id,display_name,is_captain,is_playing&order=created_at`);
+  const members = allMembers.filter((m) => m.is_playing !== false);
+  const guests = allMembers.filter((m) => m.is_playing === false);
   const questions = await get(`feud_questions?group_id=eq.${group.id}&select=id`);
   const asg = await get(`feud_question_assignments?group_id=eq.${group.id}&select=member_id,question_id`);
   const qids = questions.map((q) => q.id);
@@ -250,7 +284,7 @@ async function cmdStatus(name) {
   const answered = new Map();
   for (const r of resp) answered.set(r.member_id, (answered.get(r.member_id) || 0) + 1);
   console.log(`\n${group.name}  (${group.join_code})  status=${group.status}`);
-  console.log(`questions: ${questions.length} | topics chosen: ${topics.length} | trivia bank: ${trivia.length}`);
+  console.log(`players: ${members.length} | answer-only names: ${guests.length} | questions: ${questions.length} | topics chosen: ${topics.length} | trivia bank: ${trivia.length}`);
   for (const m of members) {
     const a = answered.get(m.id) || 0, target = questions.length - (holdout.has(m.id) ? 1 : 0);
     console.log(`  ${(m.display_name + (m.is_captain ? " (cap)" : "")).padEnd(18)} ${a}/${target} answered  holdout:${holdout.has(m.id) ? "yes" : "NONE"}`);
