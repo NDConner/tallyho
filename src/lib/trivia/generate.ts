@@ -42,11 +42,15 @@ export function buildStarterBank(opts: {
     arr.push(q);
     poolByTopic.set(q.topic, arr);
   }
-  // A topic's questions, hardest-first (shuffled within each tier), minus any
-  // the host flagged as too obvious.
+  // A topic's questions, hardest-first (expert → hard → the rest, shuffled
+  // within each tier), minus any the host flagged as too obvious.
   const orderedTopic = (topic: string): StarterQuestion[] => {
     const all = (poolByTopic.get(topic) ?? []).filter((q) => !exclude.has(norm(q.prompt)));
-    return [...shuffle(all.filter((q) => q.hard)), ...shuffle(all.filter((q) => !q.hard))];
+    return [
+      ...shuffle(all.filter((q) => q.expert)),
+      ...shuffle(all.filter((q) => q.hard && !q.expert)),
+      ...shuffle(all.filter((q) => !q.hard && !q.expert)),
+    ];
   };
 
   const perTeam = opts.teams.map((team) => {

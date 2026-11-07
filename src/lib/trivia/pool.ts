@@ -6,6 +6,7 @@ export interface StarterQuestion {
   answer: string;
   variants: string[];
   hard?: boolean; // taken before non-hard questions of the same topic
+  expert?: boolean; // taken before merely-hard questions (toughest tier)
 }
 
 export const STARTER_POOL: StarterQuestion[] = [
@@ -536,4 +537,69 @@ export const STARTER_POOL: StarterQuestion[] = [
   // Reality TV (harder)
   { category: "Entertainment", topic: "Reality TV", prompt: "Which singing competition crowned Kelly Clarkson its first winner in 2002?", answer: "American Idol", variants: ["Idol"], hard: true },
   { category: "Entertainment", topic: "Reality TV", prompt: "Which business competition made Donald Trump's catchphrase 'You're fired' famous?", answer: "The Apprentice", variants: ["Apprentice"], hard: true },
+
+  // ===================== EXPERT TIER (2026-11-07) =====================
+  // Toughest questions for the topics in play; preferred above `hard`.
+
+  // US States (expert)
+  { category: "Geography", topic: "US States", prompt: "Which U.S. state capital is the least populous, with under 8,000 residents?", answer: "Montpelier", variants: ["Montpelier, Vermont"], hard: true, expert: true },
+  { category: "Geography", topic: "US States", prompt: "Which is the only U.S. state named after a U.S. president?", answer: "Washington", variants: ["Washington"], hard: true, expert: true },
+  { category: "Geography", topic: "US States", prompt: "Which U.S. state has the most national parks, with nine?", answer: "California", variants: ["California"], hard: true, expert: true },
+  { category: "Geography", topic: "US States", prompt: "Jackson is the capital of which U.S. state?", answer: "Mississippi", variants: ["Mississippi"], hard: true, expert: true },
+  { category: "Geography", topic: "US States", prompt: "Missouri and which other state each border eight others, the most of any state?", answer: "Tennessee", variants: ["Tennessee"], hard: true, expert: true },
+  { category: "Geography", topic: "US States", prompt: "The geographic center of the contiguous 48 states lies in which state?", answer: "Kansas", variants: ["Kansas"], hard: true, expert: true },
+
+  // Reality TV (expert)
+  { category: "Entertainment", topic: "Reality TV", prompt: "Which competition show, hosted by Phil Keoghan, sends teams racing around the world?", answer: "The Amazing Race", variants: ["Amazing Race"], hard: true, expert: true },
+  { category: "Entertainment", topic: "Reality TV", prompt: "Which villa-set dating show has contestants 'coupling up' each week?", answer: "Love Island", variants: ["Love Island"], hard: true, expert: true },
+  { category: "Entertainment", topic: "Reality TV", prompt: "Which married couple stars in HGTV's Waco-set renovation show 'Fixer Upper'?", answer: "Chip and Joanna Gaines", variants: ["the Gaineses", "Chip and Joanna"], hard: true, expert: true },
+  { category: "Entertainment", topic: "Reality TV", prompt: "Which competition crowns 'America's Next Drag Superstar', hosted by RuPaul?", answer: "RuPaul's Drag Race", variants: ["Drag Race"], hard: true, expert: true },
+
+  // Formula 1 (expert)
+  { category: "Sports", topic: "Formula 1", prompt: "Which Belgian circuit, F1's longest, features the famous Eau Rouge corner?", answer: "Spa-Francorchamps", variants: ["Spa"], hard: true, expert: true },
+  { category: "Sports", topic: "Formula 1", prompt: "How many points does a driver earn for winning a Formula 1 Grand Prix?", answer: "25", variants: ["25 points"], hard: true, expert: true },
+  { category: "Sports", topic: "Formula 1", prompt: "The Monza circuit, nicknamed the 'Temple of Speed', is in which country?", answer: "Italy", variants: ["Italy"], hard: true, expert: true },
+
+  // Baseball (expert)
+  { category: "Sports", topic: "Baseball", prompt: "Who was the last MLB player to bat over .400 in a season, hitting .406 in 1941?", answer: "Ted Williams", variants: ["Williams"], hard: true, expert: true },
+  { category: "Sports", topic: "Baseball", prompt: "Who holds the MLB single-season home run record, with 73?", answer: "Barry Bonds", variants: ["Bonds"], hard: true, expert: true },
+  { category: "Sports", topic: "Baseball", prompt: "Which 1912 ballpark, MLB's oldest still in use, is home to the Red Sox?", answer: "Fenway Park", variants: ["Fenway"], hard: true, expert: true },
+
+  // Harry Potter (expert)
+  { category: "Literature", topic: "Harry Potter", prompt: "The Hogwarts motto 'Draco Dormiens Nunquam Titillandus' translates to what?", answer: "Never tickle a sleeping dragon", variants: ["never tickle a sleeping dragon"], hard: true, expert: true },
+  { category: "Literature", topic: "Harry Potter", prompt: "Which goblin-made weapon, embedded with basilisk venom, can destroy Horcruxes?", answer: "The Sword of Gryffindor", variants: ["Sword of Gryffindor", "Gryffindor's sword"], hard: true, expert: true },
+
+  // Horror Movies (expert)
+  { category: "Entertainment", topic: "Horror Movies", prompt: "Which 1922 German silent film was an unauthorized adaptation of 'Dracula'?", answer: "Nosferatu", variants: ["Nosferatu"], hard: true, expert: true },
+  { category: "Entertainment", topic: "Horror Movies", prompt: "In 'The Silence of the Lambs', what is cannibal Hannibal Lecter's profession?", answer: "Psychiatrist", variants: ["psychiatrist", "forensic psychiatrist"], hard: true, expert: true },
+
+  // Children's Books (expert)
+  { category: "Literature", topic: "Children's Books", prompt: "Who wrote the bedtime classic 'Goodnight Moon'?", answer: "Margaret Wise Brown", variants: ["Margaret Wise Brown"], hard: true, expert: true },
+  { category: "Literature", topic: "Children's Books", prompt: "In Shel Silverstein's 'The Giving Tree', what kind of tree gives everything to a boy?", answer: "Apple tree", variants: ["apple", "an apple tree"], hard: true, expert: true },
+
+  // Animals (expert)
+  { category: "Science & Nature", topic: "Animals", prompt: "What is the only primate known to be venomous?", answer: "Slow loris", variants: ["loris"], hard: true, expert: true },
+  { category: "Science & Nature", topic: "Animals", prompt: "What is the ominous collective noun for a group of crows?", answer: "A murder", variants: ["murder"], hard: true, expert: true },
+
+  // Greek Mythology (expert)
+  { category: "Literature", topic: "Greek Mythology", prompt: "Who was the ferryman carrying souls across the River Styx into the underworld?", answer: "Charon", variants: ["Charon"], hard: true, expert: true },
+  { category: "Literature", topic: "Greek Mythology", prompt: "Which Titan was condemned to hold up the sky for eternity?", answer: "Atlas", variants: ["Atlas"], hard: true, expert: true },
+
+  // Physics (expert)
+  { category: "Science & Nature", topic: "Physics", prompt: "What is the boundary around a black hole beyond which not even light escapes?", answer: "Event horizon", variants: ["the event horizon"], hard: true, expert: true },
+  { category: "Science & Nature", topic: "Physics", prompt: "Which principle states a particle's exact position and momentum can't both be known?", answer: "Heisenberg Uncertainty Principle", variants: ["uncertainty principle", "Heisenberg"], hard: true, expert: true },
+
+  // College Football (expert)
+  { category: "Sports", topic: "College Football", prompt: "Michigan and Ohio State call their storied rivalry simply what?", answer: "The Game", variants: ["The Game"], hard: true, expert: true },
+  { category: "Sports", topic: "College Football", prompt: "The Rose Bowl traditionally matched the Big Ten champion against the champion of which conference?", answer: "Pac-12", variants: ["Pac-12", "Pacific-12", "Pac 12"], hard: true, expert: true },
+  { category: "Sports", topic: "College Football", prompt: "Minnesota and Michigan play each year for which trophy?", answer: "Little Brown Jug", variants: ["the Little Brown Jug"], hard: true, expert: true },
+
+  // US Geography (expert)
+  { category: "Geography", topic: "US Geography", prompt: "What is the lowest point in North America, located in California?", answer: "Death Valley", variants: ["Badwater Basin", "Death Valley"], hard: true, expert: true },
+  { category: "Geography", topic: "US Geography", prompt: "Which is the only U.S. state that grows coffee commercially?", answer: "Hawaii", variants: ["Hawaii"], hard: true, expert: true },
+  { category: "Geography", topic: "US Geography", prompt: "What is the highest mountain peak in North America, at 20,310 feet?", answer: "Denali", variants: ["Mount McKinley", "Denali"], hard: true, expert: true },
+
+  // Colorado Mountains (expert)
+  { category: "Geography", topic: "Colorado Mountains", prompt: "Which Colorado ski resort was founded by veterans of the 10th Mountain Division?", answer: "Vail", variants: ["Vail"], hard: true, expert: true },
+  { category: "Geography", topic: "Colorado Mountains", prompt: "The highest paved road in North America climbs which Front Range Colorado peak?", answer: "Mount Evans", variants: ["Mount Blue Sky", "Mount Evans"], hard: true, expert: true },
 ];
