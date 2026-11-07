@@ -369,14 +369,23 @@ export default async function GroupPage({
                 </Link>
               </div>
               <p className="mt-1 text-sm text-cream/55">
-                What each team will face. Edit any question, add your own, swap topics, or re-run
-                &ldquo;Generate trivia bank&rdquo; for a fresh set.
+                Hidden by default so you can play too — click a team to reveal their questions. Edit
+                any question, add your own, swap topics, or re-run &ldquo;Generate trivia bank&rdquo;
+                for a fresh set.
               </p>
               <div className="mt-4 grid gap-4 sm:grid-cols-2">
                 {triviaView.map(({ team, topics, questions }) => (
-                  <div key={team.id} className="rounded-xl border border-white/10 bg-white/5 p-4">
-                    <h3 className="font-display font-bold">{team.name}</h3>
-                    <div className="mt-1 flex flex-wrap gap-1">
+                  <details
+                    key={team.id}
+                    className="rounded-xl border border-white/10 bg-white/5 p-4 [&_summary::-webkit-details-marker]:hidden"
+                  >
+                    <summary className="flex cursor-pointer list-none items-center justify-between gap-2">
+                      <h3 className="font-display font-bold">{team.name}</h3>
+                      <span className="chip cursor-pointer text-xs whitespace-nowrap">
+                        👁 reveal {questions.length}
+                      </span>
+                    </summary>
+                    <div className="mt-3 flex flex-wrap gap-1">
                       {topics.map((t) => (
                         <span key={t.name} className="chip cursor-default text-xs">
                           {t.name}
@@ -397,7 +406,7 @@ export default async function GroupPage({
                         </li>
                       ))}
                     </ul>
-                  </div>
+                  </details>
                 ))}
               </div>
             </section>

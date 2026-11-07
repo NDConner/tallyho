@@ -80,26 +80,32 @@ export async function getMemberTasks(code: string, memberId: string) {
   const answerByQ = new Map<string, string>();
   for (const r of responses ?? []) answerByQ.set(r.question_id, r.raw_answer);
 
+  // Answers are open only while the group is in "setup". Once locked, nobody can
+  // change anything — and, crucially, we never hand back saved answers, because
+  // members identify by picking a name (no login), so returning answers would
+  // let anyone snoop on anyone else by selecting their name.
+  const locked = ctx.group.status !== "setup";
+
   // What THIS member fills out:
   //  • buffer questions — never (a host hid them from the game entirely)
   //  • consensus types  — every one except the ones they're held out of
   //  • guess_who        — everyone answers (a personal answer for others to guess)
   //  • guess_what       — only the hand-picked target answers
-  const allForMember = (questions ?? [])
-    .filter((q) => {
-      if (q.is_buffer) return false;
-      if (q.type === "guess_who") return true;
-      if (q.type === "guess_what") return q.target_member_id === memberId;
-      return !holdoutSet.has(q.id); // consensus types
-    })
-    .map((q) => ({
-      id: q.id,
-      prompt: q.prompt,
-      type: q.type,
-      options: q.options,
-      answer: answerByQ.get(q.id) ?? null,
-    }));
-  const answeredCount = allForMember.filter((q) => q.answer !== null).length;
+  const forMe = (questions ?? []).filter((q) => {
+    if (q.is_buffer) return false;
+    if (q.type === "guess_who") return true;
+    if (q.type === "guess_what") return q.target_member_id === memberId;
+    return !holdoutSet.has(q.id); // consensus types
+  });
+  // Real answered count (from the saved responses, even when we hide the values).
+  const answeredCount = forMe.filter((q) => answerByQ.get(q.id) != null).length;
+  const allForMember = forMe.map((q) => ({
+    id: q.id,
+    prompt: q.prompt,
+    type: q.type,
+    options: q.options,
+    answer: locked ? null : (answerByQ.get(q.id) ?? null),
+  }));
 
   // Captain block: team branding + topics + who-on-the-team-has-filled-out.
   let captain: {
@@ -174,9 +180,7 @@ export async function getMemberTasks(code: string, memberId: string) {
 
   return {
     groupName: ctx.group.name,
-    // Answers are open only while the group is in "setup". Once the host locks
-    // (any other status), members can review but not submit or change anything.
-    locked: ctx.group.status !== "setup",
+    locked,
     gameDate: ctx.group.scheduled_time ?? null,
     answerDeadline: ctx.group.answer_deadline ?? null,
     member: {

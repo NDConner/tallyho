@@ -228,6 +228,11 @@ function TaskRouter({ code, tasks, onSwitchUser }: { code: string; tasks: Tasks;
   });
   const answeredCount = tasks.questions.reduce((n, q) => n + (answers[q.id]?.trim() ? 1 : 0), 0);
 
+  // Once the host locks, nobody reviews answers — not even their own. Members
+  // identify by picking a name (no login), so letting anyone open the review
+  // would let them read anyone else's answers. Show a plain locked screen.
+  if (tasks.locked) return <LockedScreen tasks={tasks} onSwitchUser={onSwitchUser} />;
+
   if (view === "questions") {
     return (
       <QuestionFlow
@@ -257,6 +262,31 @@ function TaskRouter({ code, tasks, onSwitchUser }: { code: string; tasks: Tasks;
 
   // Non-captain finished.
   return <DoneCard tasks={tasks} answeredCount={answeredCount} onReview={() => setView("questions")} onSwitchUser={onSwitchUser} />;
+}
+
+/** Shown to every member once the host locks: a confirmation with no answers and
+ *  no way into the review — so no one can snoop by picking another person's name. */
+function LockedScreen({ tasks, onSwitchUser }: { tasks: Tasks; onSwitchUser: () => void }) {
+  const gd = prettyDate(tasks.gameDate);
+  return (
+    <div className="card p-7 text-center">
+      <div className="animate-pop text-6xl">🔒</div>
+      <h1 className="mt-3 font-display text-2xl font-bold">You&apos;re locked in, {tasks.member.name}!</h1>
+      <p className="mt-2 text-sm text-cream/60">
+        Your host has locked everything in for game night. No more changes — and everyone&apos;s answers
+        stay hidden until you play them live.
+      </p>
+      {tasks.total > 0 && (
+        <p className="mt-2 text-sm text-cream/70">
+          You finished {tasks.answeredCount} of {tasks.total}. 🎉
+        </p>
+      )}
+      {gd && <p className="mt-2 text-xs text-gold">🗓️ See you {gd}.</p>}
+      <button onClick={onSwitchUser} className="btn btn-ghost mt-5 text-sm">
+        I&apos;m someone else
+      </button>
+    </div>
+  );
 }
 
 function DoneCard({
