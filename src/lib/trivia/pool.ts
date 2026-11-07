@@ -5,6 +5,7 @@ export interface StarterQuestion {
   prompt: string;
   answer: string;
   variants: string[];
+  hard?: boolean; // taken before non-hard questions of the same topic
 }
 
 export const STARTER_POOL: StarterQuestion[] = [
@@ -467,4 +468,72 @@ export const STARTER_POOL: StarterQuestion[] = [
   { category: "Science & Nature", topic: "Ecology", prompt: "What is the term for an animal that eats only plants?", answer: "Herbivore", variants: ["a herbivore"] },
   { category: "Science & Nature", topic: "Ecology", prompt: "What label is given to a species at serious risk of extinction?", answer: "Endangered species", variants: ["endangered"] },
   { category: "Science & Nature", topic: "Ecology", prompt: "What single word describes the variety of living species in a habitat?", answer: "Biodiversity", variants: ["biological diversity"] },
+
+  // ===================== GAME-DAY HARD ADDITIONS (2026-11-07) =====================
+  // Custom topics captains typed that weren't in the catalog, plus harder
+  // questions for in-use topics. All flagged hard so the generator prefers them.
+
+  // Colorado Mountains (custom)
+  { category: "Geography", topic: "Colorado Mountains", prompt: "What is the highest peak in Colorado, at 14,440 feet?", answer: "Mount Elbert", variants: ["Elbert"], hard: true },
+  { category: "Geography", topic: "Colorado Mountains", prompt: "The view from which Colorado peak inspired Katharine Lee Bates to write 'America the Beautiful'?", answer: "Pikes Peak", variants: ["Pike's Peak", "Pikes"], hard: true },
+  { category: "Geography", topic: "Colorado Mountains", prompt: "Which former silver-mining town is the highest incorporated city in the U.S., at over 10,000 feet?", answer: "Leadville", variants: ["Leadville, Colorado"], hard: true },
+  { category: "Geography", topic: "Colorado Mountains", prompt: "The Maroon Bells, among the most photographed peaks in North America, sit just outside which Colorado resort town?", answer: "Aspen", variants: ["Aspen, Colorado"], hard: true },
+  { category: "Geography", topic: "Colorado Mountains", prompt: "What is the highest peak in Rocky Mountain National Park, at 14,259 feet?", answer: "Longs Peak", variants: ["Long's Peak", "Longs"], hard: true },
+  { category: "Geography", topic: "Colorado Mountains", prompt: "Colorado's 50-plus peaks above 14,000 feet are collectively nicknamed what?", answer: "Fourteeners", variants: ["14ers", "14ers"], hard: true },
+
+  // College Football (custom)
+  { category: "Sports", topic: "College Football", prompt: "Who is the only player to win the Heisman Trophy twice?", answer: "Archie Griffin", variants: ["Griffin"], hard: true },
+  { category: "Sports", topic: "College Football", prompt: "Which two schools play each year in the rivalry known as the 'Iron Bowl'?", answer: "Alabama and Auburn", variants: ["Alabama-Auburn", "Alabama vs Auburn", "Auburn and Alabama"], hard: true },
+  { category: "Sports", topic: "College Football", prompt: "Which team won the first College Football Playoff national championship, after the 2014 season?", answer: "Ohio State", variants: ["Buckeyes", "Ohio State Buckeyes"], hard: true },
+  { category: "Sports", topic: "College Football", prompt: "Notre Dame's Hesburgh Library mural, visible from the stadium, is nicknamed what?", answer: "Touchdown Jesus", variants: ["Touchdown Jesus"], hard: true },
+  { category: "Sports", topic: "College Football", prompt: "Which stadium, home to the Michigan Wolverines, is nicknamed 'The Big House'?", answer: "Michigan Stadium", variants: ["The Big House"], hard: true },
+  { category: "Sports", topic: "College Football", prompt: "The Heisman Trophy is named for John Heisman, who coached which Atlanta school to a national title?", answer: "Georgia Tech", variants: ["Georgia Institute of Technology", "Ga Tech"], hard: true },
+
+  // US Geography (custom)
+  { category: "Geography", topic: "US Geography", prompt: "Which river forms most of the border between Texas and Mexico?", answer: "Rio Grande", variants: ["the Rio Grande"], hard: true },
+  { category: "Geography", topic: "US Geography", prompt: "The Four Corners Monument marks where Utah, Arizona, New Mexico, and which fourth state meet?", answer: "Colorado", variants: ["Colorado"], hard: true },
+  { category: "Geography", topic: "US Geography", prompt: "What is the deepest lake in the United States, found in Oregon?", answer: "Crater Lake", variants: ["Crater Lake"], hard: true },
+  { category: "Geography", topic: "US Geography", prompt: "Which mountain range runs along the eastern U.S. from Georgia up to Maine?", answer: "Appalachian Mountains", variants: ["the Appalachians", "Appalachians"], hard: true },
+  { category: "Geography", topic: "US Geography", prompt: "What is the longest river in the United States?", answer: "Missouri River", variants: ["the Missouri", "Missouri"], hard: true },
+  { category: "Geography", topic: "US Geography", prompt: "Which of the five Great Lakes lies entirely within the United States?", answer: "Lake Michigan", variants: ["Michigan"], hard: true },
+
+  // Harry Potter (harder)
+  { category: "Literature", topic: "Harry Potter", prompt: "What magical core is inside Harry Potter's wand?", answer: "Phoenix feather", variants: ["a phoenix feather", "phoenix tail feather"], hard: true },
+  { category: "Literature", topic: "Harry Potter", prompt: "What form does Severus Snape's Patronus take, mirroring Lily Potter's?", answer: "A doe", variants: ["doe"], hard: true },
+
+  // Horror Movies (harder)
+  { category: "Entertainment", topic: "Horror Movies", prompt: "Which 1973 film was the first horror movie nominated for the Best Picture Oscar?", answer: "The Exorcist", variants: ["Exorcist"], hard: true },
+  { category: "Entertainment", topic: "Horror Movies", prompt: "What is the name of the burned, razor-gloved killer in 'A Nightmare on Elm Street'?", answer: "Freddy Krueger", variants: ["Freddy Krueger", "Freddy"], hard: true },
+
+  // Baseball (harder)
+  { category: "Sports", topic: "Baseball", prompt: "Which Yankees pitcher threw the only perfect game in World Series history, in 1956?", answer: "Don Larsen", variants: ["Larsen"], hard: true },
+  { category: "Sports", topic: "Baseball", prompt: "Who became the first player to hit 60 home runs in a single season, in 1927?", answer: "Babe Ruth", variants: ["Ruth"], hard: true },
+
+  // Children's Books (harder)
+  { category: "Literature", topic: "Children's Books", prompt: "Which Maurice Sendak book follows a boy named Max to an island of monsters?", answer: "Where the Wild Things Are", variants: ["Where the Wild Things Are"], hard: true },
+  { category: "Literature", topic: "Children's Books", prompt: "Which gluttonous boy falls into the chocolate river in Roald Dahl's 'Charlie and the Chocolate Factory'?", answer: "Augustus Gloop", variants: ["Augustus", "Gloop"], hard: true },
+
+  // Animals (harder)
+  { category: "Science & Nature", topic: "Animals", prompt: "What is the largest living species of lizard?", answer: "Komodo dragon", variants: ["Komodo dragon"], hard: true },
+  { category: "Science & Nature", topic: "Animals", prompt: "Which is the only bird able to fly backwards?", answer: "Hummingbird", variants: ["the hummingbird"], hard: true },
+
+  // Formula 1 (harder)
+  { category: "Sports", topic: "Formula 1", prompt: "Which British driver passed Michael Schumacher for the most career Formula 1 race wins?", answer: "Lewis Hamilton", variants: ["Hamilton"], hard: true },
+  { category: "Sports", topic: "Formula 1", prompt: "Which driver won the 2021 Formula 1 title on the final lap of the Abu Dhabi Grand Prix?", answer: "Max Verstappen", variants: ["Verstappen"], hard: true },
+
+  // Greek Mythology (harder)
+  { category: "Literature", topic: "Greek Mythology", prompt: "Who is the Greek god of the sea, a brother of Zeus and Hades?", answer: "Poseidon", variants: ["Poseidon"], hard: true },
+  { category: "Literature", topic: "Greek Mythology", prompt: "Which Greek hero completed twelve labors, beginning with slaying the Nemean Lion?", answer: "Heracles", variants: ["Hercules"], hard: true },
+
+  // Physics (harder)
+  { category: "Science & Nature", topic: "Physics", prompt: "Which negatively charged subatomic particle orbits an atom's nucleus?", answer: "Electron", variants: ["an electron"], hard: true },
+  { category: "Science & Nature", topic: "Physics", prompt: "What term describes the amount of matter in an object, unchanged by gravity?", answer: "Mass", variants: ["mass"], hard: true },
+
+  // US States (harder)
+  { category: "Geography", topic: "US States", prompt: "Which U.S. state has the most counties, with 254?", answer: "Texas", variants: ["Texas"], hard: true },
+  { category: "Geography", topic: "US States", prompt: "Michigan is the only U.S. state made up of two separate what?", answer: "Peninsulas", variants: ["peninsulas", "two peninsulas"], hard: true },
+
+  // Reality TV (harder)
+  { category: "Entertainment", topic: "Reality TV", prompt: "Which singing competition crowned Kelly Clarkson its first winner in 2002?", answer: "American Idol", variants: ["Idol"], hard: true },
+  { category: "Entertainment", topic: "Reality TV", prompt: "Which business competition made Donald Trump's catchphrase 'You're fired' famous?", answer: "The Apprentice", variants: ["Apprentice"], hard: true },
 ];
