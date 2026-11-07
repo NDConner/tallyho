@@ -20,6 +20,9 @@ export async function POST(req: Request) {
 
   const ctx = await validateMember(code, memberId);
   if (!ctx) return NextResponse.json({ ok: false }, { status: 403 });
+  if (ctx.group.status !== "setup") {
+    return NextResponse.json({ ok: false, error: "locked" }, { status: 423 });
+  }
   if (!ctx.member.is_captain || ctx.member.team_id !== teamId) {
     return NextResponse.json({ ok: false, error: "not captain of this team" }, { status: 403 });
   }

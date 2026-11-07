@@ -9,7 +9,7 @@ import { RosterEditor } from "@/components/RosterEditor";
 import { GroupAdmin } from "@/components/GroupAdmin";
 import { GameLengthControl } from "@/components/GameLengthControl";
 import { GameSchedule } from "@/components/GameSchedule";
-import { addMember, generateTriviaBank, reshuffleTeams, addGuest, removeMember } from "./actions";
+import { addMember, generateTriviaBank, reshuffleTeams, addGuest, removeMember, setAnswerLock } from "./actions";
 import type { Group, Member, Team } from "@/lib/types";
 
 function appUrl(): string {
@@ -76,6 +76,9 @@ export default async function GroupPage({
 
   const link = joinLink(group, appUrl());
   const hostReady = (assignCount ?? 0) > 0 && (triviaCount ?? 0) > 0;
+  // Answers are open only in "setup". The host can lock them (→ "ready") so no
+  // one can submit or change anything before the game.
+  const answersLocked = group.status !== "setup";
 
   // Per-member fill-out progress. What a member owes depends on type:
   //   consensus — all of them except their one holdout
@@ -84,9 +87,11 @@ export default async function GroupPage({
   const CONSENSUS_TYPES = ["pick_person", "likelihood", "multiple_choice", "open_text"];
   const { data: qRows } = await supabase
     .from("feud_questions")
-    .select("id, type, target_member_id")
+    .select("id, type, target_member_id, is_buffer")
     .eq("group_id", id);
-  const allQs = qRows ?? [];
+  // Buffered questions are hidden from the game, so they don't count toward what
+  // members owe or how long the game can run.
+  const allQs = (qRows ?? []).filter((q) => !q.is_buffer);
   const totalQuestions = allQs.length;
   const qIds = allQs.map((q) => q.id);
   const consensusCount = allQs.filter((q) => CONSENSUS_TYPES.includes(q.type)).length;
@@ -205,6 +210,44 @@ export default async function GroupPage({
       <div className="mt-8 grid gap-6 lg:grid-cols-3">
         {/* left: readiness + roster */}
         <div className="space-y-6 lg:col-span-2">
+          {/* answer lock */}
+          <section
+            className={
+              "card p-5 " + (answersLocked ? "border-magenta/40 bg-magenta/5" : "border-green/30 bg-green/5")
+            }
+          >
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="min-w-0">
+                <h2 className="font-display text-lg font-bold">
+                  {answersLocked ? "🔒 Answers are locked" : "🟢 Answers are open"}
+                </h2>
+                <p className="mt-1 text-sm text-cream/60">
+                  {answersLocked
+                    ? "Everyone can still review their answers, but no one can submit or change anything (answers, topics, team names, or logos)."
+                    : "Members can still submit and edit their answers from their phones. Lock them when everyone's done so nothing changes before the game."}
+                </p>
+              </div>
+              {group.status === "setup" && (
+                <form action={setAnswerLock}>
+                  <input type="hidden" name="groupId" value={group.id} />
+                  <input type="hidden" name="lock" value="1" />
+                  <button type="submit" className="btn btn-primary text-sm whitespace-nowrap">
+                    🔒 Lock answers
+                  </button>
+                </form>
+              )}
+              {group.status === "ready" && (
+                <form action={setAnswerLock}>
+                  <input type="hidden" name="groupId" value={group.id} />
+                  <input type="hidden" name="lock" value="0" />
+                  <button type="submit" className="btn btn-ghost text-sm whitespace-nowrap">
+                    🔓 Reopen answers
+                  </button>
+                </form>
+              )}
+            </div>
+          </section>
+
           {/* path to game night */}
           <section className="card p-5">
             <h2 className="font-display text-lg font-bold">Path to game night</h2>

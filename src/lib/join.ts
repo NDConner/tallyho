@@ -34,7 +34,7 @@ export async function lookupGroup(code: string) {
   const supabase = createSupabaseAdminClient();
   const { data: group } = await supabase
     .from("groups")
-    .select("id, name, dynamic_note, join_code, scheduled_time, answer_deadline, trivia_categories")
+    .select("id, name, status, dynamic_note, join_code, scheduled_time, answer_deadline, trivia_categories")
     .eq("join_code", code.trim().toUpperCase())
     .maybeSingle();
   if (!group) return null;
@@ -71,7 +71,7 @@ export async function getMemberTasks(code: string, memberId: string) {
   const [{ data: questions }, { data: responses }] = await Promise.all([
     supabase
       .from("feud_questions")
-      .select("id, prompt, type, options, target_member_id")
+      .select("id, prompt, type, options, target_member_id, is_buffer")
       .eq("group_id", ctx.group.id)
       .order("created_at"),
     supabase.from("feud_responses").select("question_id, raw_answer").eq("member_id", memberId),
@@ -81,11 +81,13 @@ export async function getMemberTasks(code: string, memberId: string) {
   for (const r of responses ?? []) answerByQ.set(r.question_id, r.raw_answer);
 
   // What THIS member fills out:
-  //  • consensus types — every one except the ones they're held out of
-  //  • guess_who       — everyone answers (a personal answer for others to guess)
-  //  • guess_what      — only the hand-picked target answers
+  //  • buffer questions — never (a host hid them from the game entirely)
+  //  • consensus types  — every one except the ones they're held out of
+  //  • guess_who        — everyone answers (a personal answer for others to guess)
+  //  • guess_what       — only the hand-picked target answers
   const allForMember = (questions ?? [])
     .filter((q) => {
+      if (q.is_buffer) return false;
       if (q.type === "guess_who") return true;
       if (q.type === "guess_what") return q.target_member_id === memberId;
       return !holdoutSet.has(q.id); // consensus types
@@ -172,6 +174,9 @@ export async function getMemberTasks(code: string, memberId: string) {
 
   return {
     groupName: ctx.group.name,
+    // Answers are open only while the group is in "setup". Once the host locks
+    // (any other status), members can review but not submit or change anything.
+    locked: ctx.group.status !== "setup",
     gameDate: ctx.group.scheduled_time ?? null,
     answerDeadline: ctx.group.answer_deadline ?? null,
     member: {

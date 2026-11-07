@@ -8,6 +8,10 @@ export async function POST(req: Request) {
 
   const ctx = await validateMember(String(code), String(memberId));
   if (!ctx) return NextResponse.json({ ok: false }, { status: 403 });
+  // Host has locked answers — nobody can submit or change anything.
+  if (ctx.group.status !== "setup") {
+    return NextResponse.json({ ok: false, error: "locked" }, { status: 423 });
+  }
 
   const supabase = createSupabaseAdminClient();
   const { data: q } = await supabase

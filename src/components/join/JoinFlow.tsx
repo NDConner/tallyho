@@ -37,6 +37,7 @@ interface Captain {
 }
 interface Tasks {
   groupName: string;
+  locked: boolean;
   gameDate: string | null;
   answerDeadline: string | null;
   member: { id: string; name: string; isCaptain: boolean; teamId: string | null };
@@ -312,6 +313,7 @@ function CaptainHub({
   onSwitchUser: () => void;
 }) {
   const cap = tasks.captain!;
+  const locked = tasks.locked;
   const [teamName, setTeamName] = useState(cap.teamName);
   const [logoUrl, setLogoUrl] = useState<string | null>(cap.logoUrl);
   const [selected, setSelected] = useState<{ name: string; category: string }[]>(cap.selected);
@@ -336,13 +338,20 @@ function CaptainHub({
         )}
       </div>
 
+      {locked && (
+        <p className="mt-4 rounded-xl border border-gold/30 bg-gold/10 px-3 py-2 text-center text-xs text-gold">
+          🔒 Your host has locked things in for game night. You can review everything below, but team
+          details, topics, and answers can&apos;t be changed now.
+        </p>
+      )}
+
       {/* 1) Team name + logo */}
       <div className="mt-4 rounded-xl border border-white/10 bg-ink/40 p-3">
         <div className="label mb-2">1 · Your team</div>
         <div className="flex items-center gap-3">
-          <TeamLogo code={code} memberId={tasks.member.id} teamId={cap.teamId} logoUrl={logoUrl} onChange={setLogoUrl} />
+          <TeamLogo code={code} memberId={tasks.member.id} teamId={cap.teamId} logoUrl={logoUrl} onChange={setLogoUrl} locked={locked} />
           <div className="min-w-0 flex-1">
-            <TeamNameEditor code={code} memberId={tasks.member.id} teamId={cap.teamId} name={teamName} onRenamed={setTeamName} />
+            <TeamNameEditor code={code} memberId={tasks.member.id} teamId={cap.teamId} name={teamName} onRenamed={setTeamName} locked={locked} />
           </div>
         </div>
       </div>
@@ -357,6 +366,7 @@ function CaptainHub({
           categories={cap.categories}
           selected={selected}
           onSaved={setSelected}
+          locked={locked}
         />
       </div>
 
@@ -394,7 +404,11 @@ function CaptainHub({
       {/* 4) Answer your own */}
       <div className="mt-4">
         <button onClick={onAnswer} className="btn btn-primary w-full">
-          {myDone ? "✓ Review my questions" : `4 · Answer my questions (${answeredCount}/${tasks.total}) →`}
+          {locked
+            ? "👀 Review my answers"
+            : myDone
+              ? "✓ Review my questions"
+              : `4 · Answer my questions (${answeredCount}/${tasks.total}) →`}
         </button>
         <button onClick={onSwitchUser} className="mt-2 w-full text-center text-xs text-cream/45 hover:text-cream">
           I&apos;m someone else
@@ -410,12 +424,14 @@ function TeamLogo({
   teamId,
   logoUrl,
   onChange,
+  locked,
 }: {
   code: string;
   memberId: string;
   teamId: string;
   logoUrl: string | null;
   onChange: (u: string | null) => void;
+  locked?: boolean;
 }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -464,9 +480,9 @@ function TeamLogo({
       <button
         type="button"
         onClick={() => inputRef.current?.click()}
-        disabled={busy}
-        className="grid h-16 w-16 place-items-center overflow-hidden rounded-full border border-dashed border-white/25 bg-white/5 text-xl hover:border-cyan"
-        title="Upload a team logo or photo"
+        disabled={busy || locked}
+        className="grid h-16 w-16 place-items-center overflow-hidden rounded-full border border-dashed border-white/25 bg-white/5 text-xl hover:border-cyan disabled:hover:border-white/25"
+        title={locked ? "Locked by your host" : "Upload a team logo or photo"}
       >
         {logoUrl ? (
           // eslint-disable-next-line @next/next/no-img-element
@@ -490,9 +506,13 @@ function TeamLogo({
       />
       <div className="mt-1 text-[0.65rem] text-cream/45">
         {logoUrl ? (
-          <button onClick={remove} disabled={busy} className="hover:text-magenta">
-            Remove
-          </button>
+          locked ? (
+            "Team logo"
+          ) : (
+            <button onClick={remove} disabled={busy} className="hover:text-magenta">
+              Remove
+            </button>
+          )
         ) : (
           "Logo (optional)"
         )}
@@ -509,6 +529,7 @@ function CaptainTopics({
   categories,
   selected,
   onSaved,
+  locked,
 }: {
   code: string;
   memberId: string;
@@ -516,6 +537,7 @@ function CaptainTopics({
   categories: ActiveCategory[];
   selected: { name: string; category: string }[];
   onSaved: (s: { name: string; category: string }[]) => void;
+  locked?: boolean;
 }) {
   const [picks, setPicks] = useState<Record<string, string>>(() => {
     const init: Record<string, string> = {};
@@ -571,8 +593,9 @@ function CaptainTopics({
                     key={t}
                     type="button"
                     onClick={() => set(cat.name, t)}
+                    disabled={locked}
                     className={
-                      "rounded-full border px-2.5 py-1 text-xs font-semibold transition " +
+                      "rounded-full border px-2.5 py-1 text-xs font-semibold transition disabled:opacity-60 " +
                       (picks[cat.name] === t
                         ? "border-magenta bg-magenta/25 text-cream"
                         : "border-white/15 bg-white/5 text-cream/70 hover:border-cyan hover:text-cream")
@@ -586,6 +609,7 @@ function CaptainTopics({
             <input
               value={picks[cat.name] && !cat.topics.includes(picks[cat.name]) ? picks[cat.name] : ""}
               onChange={(e) => set(cat.name, e.target.value)}
+              disabled={locked}
               placeholder={cat.topics.length ? "…or type your own" : "Type a topic (e.g. our 2024 retreat)"}
               maxLength={60}
               className="input mt-1.5 text-sm"
@@ -593,8 +617,8 @@ function CaptainTopics({
           </div>
         ))}
       </div>
-      <button onClick={save} disabled={busy || saved} className="btn btn-primary mt-3 w-full text-sm">
-        {busy ? "Saving…" : saved ? "Topics saved ✓" : "Save topics"}
+      <button onClick={save} disabled={busy || saved || locked} className="btn btn-primary mt-3 w-full text-sm">
+        {locked ? "🔒 Locked" : busy ? "Saving…" : saved ? "Topics saved ✓" : "Save topics"}
       </button>
     </div>
   );
@@ -607,12 +631,14 @@ function TeamNameEditor({
   teamId,
   name,
   onRenamed,
+  locked,
 }: {
   code: string;
   memberId: string;
   teamId: string;
   name: string;
   onRenamed: (n: string) => void;
+  locked?: boolean;
 }) {
   const [val, setVal] = useState(name);
   const [busy, setBusy] = useState(false);
@@ -649,6 +675,7 @@ function TeamNameEditor({
         <input
           value={val}
           maxLength={40}
+          disabled={locked}
           onChange={(e) => {
             setVal(e.target.value);
             setSaved(false);
@@ -656,8 +683,8 @@ function TeamNameEditor({
           onKeyDown={(e) => e.key === "Enter" && save()}
           className="input text-sm"
         />
-        <button onClick={save} disabled={busy || saved} className="btn btn-primary shrink-0 text-xs">
-          {busy ? "…" : saved ? "✓" : "Save"}
+        <button onClick={save} disabled={busy || saved || locked} className="btn btn-primary shrink-0 text-xs">
+          {locked ? "🔒" : busy ? "…" : saved ? "✓" : "Save"}
         </button>
       </div>
     </div>
@@ -699,6 +726,7 @@ function QuestionFlow({
   const [failed, setFailed] = useState<Record<string, boolean>>({});
 
   const q = tasks.questions[idx];
+  const locked = tasks.locked;
 
   useEffect(() => {
     setText(answers[q?.id] ?? "");
@@ -715,6 +743,7 @@ function QuestionFlow({
   // to review. The network write runs in the background with one retry; a hard
   // failure flags the question so an answer is never silently dropped.
   function saveAnswer(qid: string, value: string) {
+    if (locked) return; // answers are locked by the host — review only
     const v = value.trim();
     if (!v) return;
     setAnswers((a) => (a[qid] === v ? a : { ...a, [qid]: v }));
@@ -781,6 +810,11 @@ function QuestionFlow({
             {answeredCount}/{total} answered
           </span>
         </div>
+        {locked && (
+          <p className="mt-2 rounded-lg border border-gold/30 bg-gold/10 px-3 py-2 text-xs text-gold">
+            🔒 Answers are locked by your host — you can review yours, but can&apos;t change them.
+          </p>
+        )}
         <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-white/10">
           <div
             className="h-full rounded-full bg-magenta transition-all"
@@ -824,7 +858,7 @@ function QuestionFlow({
               {tasks.roster
                 .filter((m) => m.name.toLowerCase().includes(optFilter.trim().toLowerCase()))
                 .map((m) => (
-                  <OptionButton key={m.id} label={m.name} selected={selected === m.name} onClick={() => saveAnswer(q.id, m.name)} />
+                  <OptionButton key={m.id} label={m.name} selected={selected === m.name} onClick={() => saveAnswer(q.id, m.name)} disabled={locked} />
                 ))}
             </div>
           </div>
@@ -843,7 +877,7 @@ function QuestionFlow({
             {(q.options ?? [])
               .filter((o) => o.toLowerCase().includes(optFilter.trim().toLowerCase()))
               .map((o) => (
-                <OptionButton key={o} label={o} selected={selected === o} onClick={() => saveAnswer(q.id, o)} wide />
+                <OptionButton key={o} label={o} selected={selected === o} onClick={() => saveAnswer(q.id, o)} wide disabled={locked} />
               ))}
           </div>
         )}
@@ -851,6 +885,7 @@ function QuestionFlow({
         {q.type === "open_text" && (
           <input
             autoFocus
+            disabled={locked}
             value={text}
             onChange={(e) => setText(e.target.value)}
             onBlur={() => text.trim() && saveAnswer(q.id, text)}
@@ -869,6 +904,7 @@ function QuestionFlow({
         {q.type === "guess_who" && (
           <input
             autoFocus
+            disabled={locked}
             value={text}
             onChange={(e) => setText(e.target.value)}
             onBlur={() => text.trim() && saveAnswer(q.id, text)}
@@ -887,6 +923,7 @@ function QuestionFlow({
         {q.type === "guess_what" && (
           <textarea
             autoFocus
+            disabled={locked}
             value={text}
             onChange={(e) => setText(e.target.value)}
             onBlur={() => text.trim() && saveAnswer(q.id, text)}
@@ -907,22 +944,28 @@ function OptionButton({
   selected,
   onClick,
   wide,
+  disabled,
 }: {
   label: string;
   selected: boolean;
   onClick: () => void;
   wide?: boolean;
+  disabled?: boolean;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
+      disabled={disabled}
       className={
-        "rounded-xl border px-3 py-3 text-sm font-semibold transition active:scale-[0.98] " +
+        "rounded-xl border px-3 py-3 text-sm font-semibold transition " +
+        (disabled ? "cursor-default " : "active:scale-[0.98] ") +
         (wide ? "w-full text-left " : "") +
         (selected
           ? "border-magenta bg-magenta/25 text-cream ring-1 ring-magenta"
-          : "border-white/15 bg-white/5 text-cream/80 hover:border-magenta hover:bg-magenta/10 hover:text-cream")
+          : disabled
+            ? "border-white/10 bg-white/5 text-cream/40"
+            : "border-white/15 bg-white/5 text-cream/80 hover:border-magenta hover:bg-magenta/10 hover:text-cream")
       }
     >
       {selected && <span className="mr-1">✓</span>}

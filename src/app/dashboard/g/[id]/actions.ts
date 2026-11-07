@@ -189,6 +189,33 @@ export async function generateTriviaBank(formData: FormData) {
 }
 
 /**
+ * Lock or reopen member answers. Locking moves the group out of "setup" (to
+ * "ready"), which the member/captain write routes reject — so nobody can submit
+ * or change answers, topics, team names, or logos. Reopening returns to "setup".
+ * Doesn't touch a game already in progress ("live"/"done" stay as they are).
+ */
+export async function setAnswerLock(formData: FormData) {
+  const groupId = String(formData.get("groupId") || "");
+  const lock = String(formData.get("lock") || "") === "1";
+  if (!groupId) return;
+  const supabase = await createSupabaseServerClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return;
+  const { data: g } = await supabase.from("groups").select("status").eq("id", groupId).single();
+  if (!g) return;
+  if (lock) {
+    // Only lock from the open "setup" state; never stomp a live/done game.
+    if (g.status === "setup") await supabase.from("groups").update({ status: "ready" }).eq("id", groupId);
+  } else {
+    // Reopen only from a locked-but-not-yet-played state.
+    if (g.status === "ready") await supabase.from("groups").update({ status: "setup" }).eq("id", groupId);
+  }
+  revalidatePath(`/dashboard/g/${groupId}`);
+}
+
+/**
  * Add an "answer-only" name: someone in the friend group who should be pickable
  * on pick-a-person questions but won't be at game night. They get no team, no
  * join, no fill-out, and never take a turn.

@@ -54,10 +54,14 @@ async function orderedPlayers(supabase: SupabaseClient, groupId: string): Promis
 async function consensusQuestionIds(supabase: SupabaseClient, groupId: string): Promise<string[]> {
   const { data } = await supabase
     .from("feud_questions")
-    .select("id, type")
+    .select("id, type, is_buffer")
     .eq("group_id", groupId)
     .order("created_at");
-  return (data ?? []).filter((q) => CONSENSUS_TYPES.includes(q.type)).map((q) => q.id);
+  // Buffer questions are explicitly held out of play (a host can hide any
+  // question by flagging it is_buffer), so they never become a live holdout.
+  return (data ?? [])
+    .filter((q) => CONSENSUS_TYPES.includes(q.type) && !q.is_buffer)
+    .map((q) => q.id);
 }
 
 /** True when the current assignments already equal the given plan exactly. */
