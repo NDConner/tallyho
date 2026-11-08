@@ -33,7 +33,7 @@ export default async function PlayPage({ params }: { params: Promise<{ gameId: s
       supabase.from("feud_questions").select("id, prompt, type, options").eq("group_id", groupId),
       supabase
         .from("trivia_questions")
-        .select("id, team_id, topic, prompt, point_value")
+        .select("id, team_id, topic, prompt, point_value, used")
         .eq("group_id", groupId),
       supabase.from("trivia_topics").select("name, category").eq("group_id", groupId),
     ]);
@@ -69,6 +69,12 @@ export default async function PlayPage({ params }: { params: Promise<{ gameId: s
     if (!topicsByTeam[t.team_id].includes(t.topic)) topicsByTeam[t.team_id].push(t.topic);
   }
 
+  // Trivia already asked earlier in this game (used = true). Seeding these means
+  // a resumed game never re-asks a question the group has already seen.
+  const usedTriviaIds = (trivia ?? [])
+    .filter((t) => (t as { used?: boolean }).used)
+    .map((t) => t.id);
+
   const initialScores: Record<string, number> = {};
   for (const t of teams ?? []) initialScores[t.id] = 0;
   for (const s of scoreRows ?? []) initialScores[s.team_id] = s.points;
@@ -103,6 +109,7 @@ export default async function PlayPage({ params }: { params: Promise<{ gameId: s
     feudQuestions,
     triviaByTeam,
     topicsByTeam,
+    usedTriviaIds,
   };
 
   return <LiveGame {...payload} />;

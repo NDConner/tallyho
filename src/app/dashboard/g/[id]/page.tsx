@@ -65,11 +65,34 @@ export default async function GroupPage({
   const players = members.filter((m) => m.is_playing !== false);
   const guests = members.filter((m) => m.is_playing === false);
 
-  // Most recent game (for the end-of-game recap link).
-  const { data: latestGame } = await supabase
+  // In-progress game to resume. Pick the most-PROGRESSED unfinished game, not
+  // merely the newest — an accidental "start a new game" click can leave an empty
+  // newer row that would otherwise shadow the real game and strand the host.
+  const { data: liveGames } = await supabase
     .from("games")
-    .select("id, status, created_at")
+    .select("id, status, state")
     .eq("group_id", id)
+    .in("status", ["active", "paused"])
+    .order("created_at", { ascending: false })
+    .limit(20);
+  type LiveGameRow = { id: string; status: string; state: { cursor?: number; queue?: unknown[] } | null };
+  const resumable =
+    ((liveGames ?? []) as LiveGameRow[])
+      .map((g) => ({
+        id: g.id,
+        status: g.status,
+        cursor: g.state?.cursor ?? 0,
+        total: g.state?.queue?.length ?? 0,
+      }))
+      .filter((g) => g.cursor >= 1 && g.total > 0) // actually started (at least one turn in)
+      .sort((a, b) => b.cursor - a.cursor)[0] ?? null;
+
+  // Newest FINISHED game — for the shareable end-of-game recap link.
+  const { data: lastDoneGame } = await supabase
+    .from("games")
+    .select("id")
+    .eq("group_id", id)
+    .eq("status", "done")
     .order("created_at", { ascending: false })
     .limit(1)
     .maybeSingle();
@@ -210,6 +233,25 @@ export default async function GroupPage({
       <div className="mt-8 grid gap-6 lg:grid-cols-3">
         {/* left: readiness + roster */}
         <div className="space-y-6 lg:col-span-2">
+          {/* resume an in-progress game (survives an accidental exit or closed tab) */}
+          {resumable && (
+            <section className="card border-gold/50 bg-gold/10 p-5">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <h2 className="font-display text-lg font-bold">🎮 Game in progress</h2>
+                  <p className="mt-1 text-sm text-cream/70">
+                    You&apos;re on question {Math.min(resumable.cursor + 1, resumable.total)} of{" "}
+                    {resumable.total}. Exiting or closing the tab never loses your place — jump back in
+                    right where you left off, with every score intact.
+                  </p>
+                </div>
+                <a href={`/play/${resumable.id}`} className="btn btn-primary whitespace-nowrap text-sm">
+                  ▶ Resume game
+                </a>
+              </div>
+            </section>
+          )}
+
           {/* answer lock */}
           <section
             className={
@@ -520,6 +562,13 @@ export default async function GroupPage({
                   Mirror your screen to the TV and run it from here. Pick how long you want it — each
                   team plays the same number of questions, and trivia matches feud 1:1.
                 </p>
+                {resumable && (
+                  <p className="mt-3 rounded-lg border border-gold/30 bg-gold/5 px-3 py-2 text-xs text-gold">
+                    ⚠ A game is already in progress — use <span className="font-semibold">Resume game</span> at
+                    the top to continue it. Starting here begins a brand-new game with fresh questions and a
+                    0–0 scoreboard.
+                  </p>
+                )}
                 <GameLengthControl groupId={group.id} capacity={capacity} numTeams={teams.length} />
               </>
             ) : (
@@ -530,15 +579,17 @@ export default async function GroupPage({
             )}
           </section>
 
-          {/* last game recap */}
-          {latestGame && (
+          {/* last game recap — only for a FINISHED game, so an in-progress game's
+              empty recap never shows up here (that's what sent the host to a recap
+              instead of back into their game). */}
+          {lastDoneGame && (
             <section className="card p-5">
               <h2 className="font-display text-lg font-bold">Last game recap</h2>
               <p className="mt-1 text-sm text-cream/55">
                 Stats, superlatives and a player card for everyone — a fun, shareable wrap-up of your
                 last game.
               </p>
-              <a href={`/recap/${latestGame.id}`} className="btn btn-secondary mt-3 text-sm">
+              <a href={`/recap/${lastDoneGame.id}`} className="btn btn-secondary mt-3 text-sm">
                 🎬 Open recap
               </a>
             </section>

@@ -58,6 +58,7 @@ export interface LiveGamePayload {
   feudQuestions: Record<string, FeudQ>;
   triviaByTeam: Record<string, TriviaQ[]>;
   topicsByTeam: Record<string, string[]>;
+  usedTriviaIds?: string[]; // trivia already asked (so a resumed game skips them)
 }
 
 type Phase = "preGame" | "intro" | "feud" | "feudReveal" | "triviaIntro" | "trivia" | "triviaReveal" | "over";
@@ -96,7 +97,7 @@ export function LiveGame(p: LiveGamePayload) {
   const [guessRes, setGuessRes] = useState<GuessResult | null>(null);
   const [guessBase, setGuessBase] = useState<GuessResult | null>(null);
   const [triviaRes, setTriviaRes] = useState<TriviaResult | null>(null);
-  const [usedTrivia, setUsedTrivia] = useState<Set<string>>(new Set());
+  const [usedTrivia, setUsedTrivia] = useState<Set<string>>(() => new Set(p.usedTriviaIds ?? []));
   const [currentTrivia, setCurrentTrivia] = useState<TriviaQ | null>(null);
 
   const turn = p.queue[cursor];
