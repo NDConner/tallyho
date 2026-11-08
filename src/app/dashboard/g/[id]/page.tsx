@@ -10,6 +10,7 @@ import { GroupAdmin } from "@/components/GroupAdmin";
 import { GameLengthControl } from "@/components/GameLengthControl";
 import { GameSchedule } from "@/components/GameSchedule";
 import { addMember, generateTriviaBank, reshuffleTeams, addGuest, removeMember, setAnswerLock } from "./actions";
+import { startTriviaOnlyGame } from "@/app/play/actions";
 import type { Group, Member, Team } from "@/lib/types";
 
 function appUrl(): string {
@@ -578,6 +579,33 @@ export default async function GroupPage({
               </p>
             )}
           </section>
+
+          {/* trivia-only quick game — no survey, no setup, play to a target */}
+          {teams.length > 0 && players.length > 0 && (
+            <section className="card border-cyan/30 bg-cyan/5 p-5">
+              <h2 className="font-display text-lg font-bold">🎲 Trivia-only game</h2>
+              <p className="mt-1 text-sm text-cream/55">
+                No survey, no setup — completely random trivia, teams go back and forth, {2} points a
+                question, first to your target wins. Start fresh games all night, or raise the bar mid-game
+                to keep going.
+              </p>
+              <form action={startTriviaOnlyGame} className="mt-3 flex flex-wrap items-center gap-2">
+                <input type="hidden" name="groupId" value={group.id} />
+                <label className="text-sm text-cream/60" htmlFor="winTarget">
+                  First to
+                </label>
+                <select id="winTarget" name="winTarget" defaultValue="30" className="input w-auto">
+                  <option value="20">20 points</option>
+                  <option value="30">30 points</option>
+                  <option value="40">40 points</option>
+                  <option value="50">50 points</option>
+                </select>
+                <button type="submit" className="btn btn-primary text-sm">
+                  ▶ Start trivia game
+                </button>
+              </form>
+            </section>
+          )}
 
           {/* last game recap — only for a FINISHED game, so an in-progress game's
               empty recap never shows up here (that's what sent the host to a recap

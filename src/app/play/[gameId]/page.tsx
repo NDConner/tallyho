@@ -22,9 +22,26 @@ export default async function PlayPage({ params }: { params: Promise<{ gameId: s
     .eq("id", groupId)
     .single();
 
-  const state = (game.state ?? {}) as { queue?: GameTurn[]; cursor?: number; questionsPerTeam?: number };
+  type TriviaPoolItem = {
+    id: string;
+    topic: string;
+    category: string | null;
+    prompt: string;
+    correct_answer?: string;
+    accepted_variants?: string[];
+    point_value?: number;
+  };
+  const state = (game.state ?? {}) as {
+    queue?: GameTurn[];
+    cursor?: number;
+    questionsPerTeam?: number;
+    triviaOnly?: boolean;
+    winTarget?: number;
+    triviaPool?: TriviaPoolItem[];
+  };
   const queue = state.queue ?? [];
   const cursor = state.cursor ?? 0;
+  const triviaOnly = Boolean(state.triviaOnly);
 
   const [{ data: teams }, { data: scoreRows }, { data: feudQs }, { data: trivia }, { data: topicRows }] =
     await Promise.all([
@@ -53,27 +70,57 @@ export default async function PlayPage({ params }: { params: Promise<{ gameId: s
     string,
     { id: string; topic: string; category: string | null; prompt: string; point_value: number }[]
   > = {};
-  for (const t of trivia ?? []) {
-    (triviaByTeam[t.team_id] ??= []).push({
-      id: t.id,
-      topic: t.topic,
-      category: categoryOfTopic.get(t.topic) ?? null,
-      prompt: t.prompt,
-      point_value: t.point_value,
-    });
-  }
-
   const topicsByTeam: Record<string, string[]> = {};
-  for (const t of trivia ?? []) {
-    (topicsByTeam[t.team_id] ??= []);
-    if (!topicsByTeam[t.team_id].includes(t.topic)) topicsByTeam[t.team_id].push(t.topic);
-  }
+  let usedTriviaIds: string[] = [];
 
-  // Trivia already asked earlier in this game (used = true). Seeding these means
-  // a resumed game never re-asks a question the group has already seen.
-  const usedTriviaIds = (trivia ?? [])
-    .filter((t) => (t as { used?: boolean }).used)
-    .map((t) => t.id);
+  if (triviaOnly) {
+    // Trivia-only game: one shared random pool for every team (answers stay in
+    // game state, server-side). The client's global "used" set keeps questions
+    // from repeating across teams. Seed already-asked ones from this game's
+    // events so a resumed trivia-only game also never repeats.
+    const clientPool = (state.triviaPool ?? []).map((q) => ({
+      id: q.id,
+      topic: q.topic,
+      category: q.category ?? null,
+      prompt: q.prompt,
+      point_value: q.point_value ?? TRIVIA_POINTS,
+    }));
+    for (const t of teams ?? []) {
+      triviaByTeam[t.id] = clientPool;
+      topicsByTeam[t.id] = [];
+    }
+    const { data: triviaEvents } = await supabase
+      .from("game_events")
+      .select("payload")
+      .eq("game_id", gameId)
+      .eq("type", "trivia_result");
+    usedTriviaIds = [
+      ...new Set(
+        (triviaEvents ?? [])
+          .map((e) => (e.payload as { questionId?: string } | null)?.questionId)
+          .filter((x): x is string => Boolean(x)),
+      ),
+    ];
+  } else {
+    for (const t of trivia ?? []) {
+      (triviaByTeam[t.team_id] ??= []).push({
+        id: t.id,
+        topic: t.topic,
+        category: categoryOfTopic.get(t.topic) ?? null,
+        prompt: t.prompt,
+        point_value: t.point_value,
+      });
+    }
+    for (const t of trivia ?? []) {
+      (topicsByTeam[t.team_id] ??= []);
+      if (!topicsByTeam[t.team_id].includes(t.topic)) topicsByTeam[t.team_id].push(t.topic);
+    }
+    // Trivia already asked earlier in this game (used = true). Seeding these means
+    // a resumed game never re-asks a question the group has already seen.
+    usedTriviaIds = (trivia ?? [])
+      .filter((t) => (t as { used?: boolean }).used)
+      .map((t) => t.id);
+  }
 
   const initialScores: Record<string, number> = {};
   for (const t of teams ?? []) initialScores[t.id] = 0;
@@ -110,6 +157,8 @@ export default async function PlayPage({ params }: { params: Promise<{ gameId: s
     triviaByTeam,
     topicsByTeam,
     usedTriviaIds,
+    triviaOnly,
+    winTarget: state.winTarget ?? null,
   };
 
   return <LiveGame {...payload} />;

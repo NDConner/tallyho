@@ -7,6 +7,7 @@ import { tallyBuckets, scoreFeudGuess } from "@/lib/feud";
 import { fuzzyMatch, normalize } from "@/lib/match";
 import { ensureAllHoldouts, reassignHoldoutsNewRound } from "@/lib/holdouts";
 import { regenerateTriviaBank } from "@/lib/trivia/regenerate";
+import { STARTER_POOL } from "@/lib/trivia/topics";
 import { shuffle } from "@/lib/utils";
 import { WIN_POINTS, TRIVIA_POINTS, SURVEY_PLACE_POINTS, placesForChoices } from "@/lib/scoring";
 import type { Member, Team, VoteBucket, SurveyKind } from "@/lib/types";
@@ -40,6 +41,18 @@ export interface TriviaResult {
   correct: boolean;
   points: number;
   correctAnswer: string;
+}
+
+// A trivia-only game carries its own random question set in games.state.triviaPool
+// (answers kept server-side), so it never touches the per-group feud-game bank.
+interface TriviaPoolItem {
+  id: string;
+  topic: string;
+  category: string | null;
+  prompt: string;
+  correct_answer: string;
+  accepted_variants: string[];
+  point_value: number;
 }
 
 // Shared result for the all-or-nothing targeted kinds. `correctLabel` is the
@@ -559,6 +572,152 @@ export async function setGameTimers(input: { gameId: string; feudSeconds: number
   await supabase
     .from("games")
     .update({ settings: { feudSeconds: input.feudSeconds, triviaSeconds: input.triviaSeconds } })
+    .eq("id", input.gameId);
+}
+
+// ============================================================================
+// Trivia-only game: no survey/feud, completely random questions from the whole
+// curated pool, teams alternate, every correct answer worth TRIVIA_POINTS, and
+// the host plays to a target score (default 30, raisable to keep going).
+// ============================================================================
+
+const TRIVIA_ONLY_TURNS_PER_TEAM = 30; // generous — the game ends on the target, not here
+const TRIVIA_ONLY_POOL_SIZE = 150; // distinct questions available across the whole game
+
+/** Spin up a trivia-only game for the group's existing teams/members and jump
+ *  to the play view. `winTarget` is the score to play to. */
+export async function startTriviaOnlyGame(formData: FormData) {
+  const groupId = String(formData.get("groupId") || "");
+  const winTarget = Math.max(10, Math.min(100, Number(formData.get("winTarget") || 30)));
+  if (!groupId) redirect("/dashboard");
+
+  const supabase = await createSupabaseServerClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) redirect("/login");
+
+  const [{ data: teamData }, { data: memberData }] = await Promise.all([
+    supabase.from("teams").select("id, name, team_index").eq("group_id", groupId).order("team_index"),
+    supabase
+      .from("members")
+      .select("id, display_name, team_id")
+      .eq("group_id", groupId)
+      .eq("is_playing", true)
+      .order("created_at"),
+  ]);
+  const teams = (teamData ?? []) as { id: string; name: string; team_index: number }[];
+  const members = (memberData ?? []) as { id: string; display_name: string; team_id: string }[];
+  if (teams.length === 0) redirect(`/dashboard/g/${groupId}`);
+
+  // Completely random: shuffle the whole curated pool and take a generous slice.
+  const pool: TriviaPoolItem[] = shuffle([...STARTER_POOL])
+    .slice(0, TRIVIA_ONLY_POOL_SIZE)
+    .map((q, i) => ({
+      id: `t${i}`,
+      topic: q.topic,
+      category: q.category ?? null,
+      prompt: q.prompt,
+      correct_answer: q.answer,
+      accepted_variants: q.variants ?? [],
+      point_value: TRIVIA_POINTS,
+    }));
+
+  // Back-and-forth: teams alternate; each team's members rotate the spotlight.
+  const membersByTeam = new Map<string, { id: string; display_name: string }[]>();
+  for (const t of teams) membersByTeam.set(t.id, members.filter((m) => m.team_id === t.id));
+  const queue: GameTurn[] = [];
+  for (let i = 0; i < TRIVIA_ONLY_TURNS_PER_TEAM; i++) {
+    for (const t of teams) {
+      const mine = membersByTeam.get(t.id) ?? [];
+      const mem = mine.length ? mine[i % mine.length] : undefined;
+      queue.push({
+        round: 1,
+        teamId: t.id,
+        teamName: t.name,
+        memberId: mem?.id ?? "",
+        memberName: mem?.display_name ?? t.name,
+        kind: "feud", // unused in trivia-only — the play flow skips the survey entirely
+        feudQuestionId: "",
+      });
+    }
+  }
+
+  const settings = { feudSeconds: DEFAULT_SETTINGS.feudSeconds, triviaSeconds: DEFAULT_SETTINGS.triviaSeconds };
+  const { data: gameRow, error } = await supabase
+    .from("games")
+    .insert({
+      group_id: groupId,
+      status: "active",
+      num_teams: teams.length,
+      num_rounds: 1,
+      current_round: 1,
+      current_team_id: queue[0].teamId,
+      current_member_id: queue[0].memberId || null,
+      current_phase: "feud",
+      settings,
+      state: { queue, cursor: 0, triviaOnly: true, winTarget, triviaPool: pool },
+      started_at: new Date().toISOString(),
+    })
+    .select("id")
+    .single();
+  if (error || !gameRow) redirect(`/dashboard/g/${groupId}`);
+
+  await supabase.from("game_scores").insert(teams.map((t) => ({ game_id: gameRow.id, team_id: t.id, points: 0 })));
+  await supabase.from("groups").update({ status: "live" }).eq("id", groupId);
+  redirect(`/play/${gameRow.id}`);
+}
+
+/** Score a trivia-only answer against the question stored in game state (keeps
+ *  answers server-side; never touches the per-group feud bank). */
+export async function scoreTriviaFromState(input: {
+  gameId: string;
+  questionId: string;
+  teamId: string;
+  answer: string;
+  memberId?: string;
+  memberName?: string;
+}): Promise<TriviaResult> {
+  const supabase = await createSupabaseServerClient();
+  const { data: game } = await supabase.from("games").select("state").eq("id", input.gameId).single();
+  const pool = ((game?.state as { triviaPool?: TriviaPoolItem[] })?.triviaPool ?? []) as TriviaPoolItem[];
+  const q = pool.find((p) => p.id === input.questionId);
+  if (!q) return { correct: false, points: 0, correctAnswer: "" };
+
+  const candidates = [q.correct_answer, ...(q.accepted_variants ?? [])];
+  const matched = fuzzyMatch(input.answer, candidates);
+  const correct = matched !== null;
+  const points = correct ? TRIVIA_POINTS : 0;
+
+  await addPoints(supabase, input.gameId, input.teamId, points);
+  await supabase.from("game_events").insert({
+    game_id: input.gameId,
+    type: "trivia_result",
+    payload: {
+      questionId: q.id,
+      answer: input.answer,
+      correct,
+      points,
+      topic: q.topic,
+      teamId: input.teamId,
+      memberId: input.memberId ?? null,
+      memberName: input.memberName ?? null,
+      round: 1,
+    },
+  });
+
+  return { correct, points, correctAnswer: q.correct_answer };
+}
+
+/** Raise (or change) the score a trivia-only game is played to — used by the
+ *  "keep playing" button after a team first hits the target. */
+export async function setWinTarget(input: { gameId: string; winTarget: number }) {
+  const supabase = await createSupabaseServerClient();
+  const { data: game } = await supabase.from("games").select("state").eq("id", input.gameId).single();
+  const st = (game?.state as Record<string, unknown>) ?? {};
+  await supabase
+    .from("games")
+    .update({ state: { ...st, winTarget: Math.max(10, Math.min(200, input.winTarget)) } })
     .eq("id", input.gameId);
 }
 

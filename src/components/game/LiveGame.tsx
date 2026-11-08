@@ -8,14 +8,17 @@ import { cn } from "@/lib/utils";
 import {
   scoreFeud,
   scoreTrivia,
+  scoreTriviaFromState,
   scoreGuessWho,
   scoreGuessWhat,
   flagTriviaTooObvious,
   persistTurn,
   setGameStatus,
   setGameTimers,
+  setWinTarget,
   adjustScore,
   startNextRound,
+  startTriviaOnlyGame,
   type GameTurn,
   type FeudResult,
   type TriviaResult,
@@ -59,6 +62,8 @@ export interface LiveGamePayload {
   triviaByTeam: Record<string, TriviaQ[]>;
   topicsByTeam: Record<string, string[]>;
   usedTriviaIds?: string[]; // trivia already asked (so a resumed game skips them)
+  triviaOnly?: boolean; // skip the survey entirely — trivia rounds only
+  winTarget?: number | null; // trivia-only: score to play to (default behaviour when null)
 }
 
 type Phase = "preGame" | "intro" | "feud" | "feudReveal" | "triviaIntro" | "trivia" | "triviaReveal" | "over";
@@ -85,6 +90,7 @@ export function LiveGame(p: LiveGamePayload) {
   const [paused, setPaused] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showScores, setShowScores] = useState(false);
+  const [winTarget, setWinTargetLocal] = useState(p.winTarget ?? 0);
 
   const [feudSeconds, setFeudSeconds] = useState(p.settings.feudSeconds);
   const [triviaSeconds, setTriviaSeconds] = useState(p.settings.triviaSeconds);
@@ -228,21 +234,42 @@ export function LiveGame(p: LiveGamePayload) {
     setPending(true);
     setPhase("triviaReveal");
     try {
-      const res = await scoreTrivia({
-        gameId: p.gameId,
-        questionId: currentTrivia.id,
-        teamId: turn.teamId,
-        answer,
-        memberId: turn.memberId,
-        memberName: turn.memberName,
-        round: turn.round,
-        topic: currentTrivia.topic,
-      });
+      const res = p.triviaOnly
+        ? await scoreTriviaFromState({
+            gameId: p.gameId,
+            questionId: currentTrivia.id,
+            teamId: turn.teamId,
+            answer,
+            memberId: turn.memberId,
+            memberName: turn.memberName,
+          })
+        : await scoreTrivia({
+            gameId: p.gameId,
+            questionId: currentTrivia.id,
+            teamId: turn.teamId,
+            answer,
+            memberId: turn.memberId,
+            memberName: turn.memberName,
+            round: turn.round,
+            topic: currentTrivia.topic,
+          });
       setTriviaRes(res);
       if (res.points > 0) setScores((s) => ({ ...s, [turn.teamId]: (s[turn.teamId] ?? 0) + res.points }));
     } finally {
       setPending(false);
     }
+  }
+
+  // Trivia-only: end now (crown the leader), or raise the target and play on.
+  async function endGameNow() {
+    await persistTurn({ gameId: p.gameId, cursor, finished: true });
+    setPhase("over");
+  }
+  async function keepPlaying() {
+    const next = (winTarget || 0) + 10;
+    setWinTargetLocal(next);
+    await setWinTarget({ gameId: p.gameId, winTarget: next });
+    await nextTurn();
   }
 
   async function nextTurn() {
@@ -366,8 +393,34 @@ export function LiveGame(p: LiveGamePayload) {
           </div>
         )}
 
+        {/* PRE-GAME (trivia-only): simple "first to N" splash */}
+        {phase === "preGame" && p.triviaOnly && (
+          <div className="w-full max-w-xl text-center">
+            <div className="text-5xl">🎲</div>
+            <h2 className="mt-3 font-display text-4xl font-black">Trivia night</h2>
+            <p className="mt-2 text-cream/70">
+              Completely random questions. Teams go back and forth — captain answers for the team.
+              Every right answer is <span className="font-semibold text-cream">{p.triviaPoints} points</span>.
+            </p>
+            {winTarget > 0 && (
+              <div className="mt-4 chip inline-flex text-sm">🏁 First to {winTarget} wins</div>
+            )}
+            <div className="mt-6 grid gap-2 sm:grid-cols-3">
+              {p.teams.map((t) => (
+                <div key={t.id} className="card flex items-center justify-center gap-2 p-3">
+                  <TeamBadge team={t} className="h-6 w-6 text-base" />
+                  <span className="font-display font-bold">{t.name}</span>
+                </div>
+              ))}
+            </div>
+            <button onClick={() => setPhase("intro")} className="btn btn-primary mt-8 text-lg">
+              Start trivia →
+            </button>
+          </div>
+        )}
+
         {/* PRE-GAME: show each team's trivia topics */}
-        {phase === "preGame" && (
+        {phase === "preGame" && !p.triviaOnly && (
           <div className="w-full max-w-2xl text-center">
             <div className="text-5xl">📋</div>
             <h2 className="mt-3 font-display text-4xl font-black">Tonight&apos;s trivia</h2>
@@ -405,26 +458,33 @@ export function LiveGame(p: LiveGamePayload) {
               <TeamBadge team={activeTeam} className="h-7 w-7 text-lg" />
               <div className="label">
                 {turn.teamName} ·{" "}
-                {turn.kind === "guess_who"
-                  ? "whose answer?"
-                  : turn.kind === "guess_what"
-                    ? "guess their answer"
-                    : "feud turn"}
+                {p.triviaOnly
+                  ? "trivia turn"
+                  : turn.kind === "guess_who"
+                    ? "whose answer?"
+                    : turn.kind === "guess_what"
+                      ? "guess their answer"
+                      : "feud turn"}
               </div>
             </div>
             <h2 className="mt-2 font-display text-5xl font-black">
               <span className={TEAM_ACCENT[accentIdx]}>{turn.memberName}</span> is up!
             </h2>
             <p className="mt-3 text-cream/60">
-              {turn.kind === "guess_who"
-                ? "An answer's about to show — name who gave it."
-                : turn.kind === "guess_what"
-                  ? `Guess what ${turn.targetName} answered.`
-                  : "Guess what the group said."}{" "}
-              {feudSeconds}s on the clock.
+              {p.triviaOnly
+                ? `A random question for ${turn.teamName} — captain answers.`
+                : turn.kind === "guess_who"
+                  ? "An answer's about to show — name who gave it."
+                  : turn.kind === "guess_what"
+                    ? `Guess what ${turn.targetName} answered.`
+                    : "Guess what the group said."}{" "}
+              {p.triviaOnly ? `${triviaSeconds}s on the clock.` : `${feudSeconds}s on the clock.`}
             </p>
-            <button onClick={startFeud} className="btn btn-primary mt-8 text-lg">
-              {turn.kind === "feud" ? "Start feud question →" : "Reveal & guess →"}
+            <button
+              onClick={p.triviaOnly ? continueToTrivia : startFeud}
+              className="btn btn-primary mt-8 text-lg"
+            >
+              {p.triviaOnly ? "Bring the question →" : turn.kind === "feud" ? "Start feud question →" : "Reveal & guess →"}
             </button>
           </div>
         )}
@@ -527,7 +587,7 @@ export function LiveGame(p: LiveGamePayload) {
               <div className="mt-1 text-sm uppercase tracking-wide text-cream/45">{currentTrivia.category}</div>
             )}
             <div className="mt-6 flex items-center justify-center gap-2">
-              <button onClick={() => setPhase("feudReveal")} className="btn btn-ghost">
+              <button onClick={() => setPhase(p.triviaOnly ? "intro" : "feudReveal")} className="btn btn-ghost">
                 ← Back
               </button>
               <button onClick={startTrivia} className="btn btn-primary text-lg">
@@ -580,6 +640,12 @@ export function LiveGame(p: LiveGamePayload) {
             onOverride={overrideTrivia}
             onNext={nextTurn}
             last={cursor + 1 >= total}
+            triviaOnly={Boolean(p.triviaOnly)}
+            winTarget={winTarget}
+            teams={p.teams}
+            scores={scores}
+            onEndGame={endGameNow}
+            onKeepPlaying={keepPlaying}
           />
         )}
 
@@ -591,6 +657,8 @@ export function LiveGame(p: LiveGamePayload) {
             groupId={p.groupId}
             gameId={p.gameId}
             questionsPerTeam={p.questionsPerTeam}
+            triviaOnly={Boolean(p.triviaOnly)}
+            winTarget={winTarget}
           />
         )}
       </div>
@@ -908,6 +976,12 @@ function TriviaRevealPanel({
   onOverride,
   onNext,
   last,
+  triviaOnly = false,
+  winTarget = 0,
+  teams = [],
+  scores = {},
+  onEndGame,
+  onKeepPlaying,
 }: {
   answer: string;
   result: TriviaResult | null;
@@ -915,6 +989,12 @@ function TriviaRevealPanel({
   onOverride: (correct: boolean) => void;
   onNext: () => void;
   last: boolean;
+  triviaOnly?: boolean;
+  winTarget?: number;
+  teams?: TeamLite[];
+  scores?: Record<string, number>;
+  onEndGame?: () => void;
+  onKeepPlaying?: () => void;
 }) {
   if (!result) {
     return (
@@ -925,6 +1005,9 @@ function TriviaRevealPanel({
     );
   }
   const correct = result.correct;
+  const ranked = [...teams].map((t) => ({ t, s: scores[t.id] ?? 0 })).sort((a, b) => b.s - a.s);
+  const leader = ranked[0];
+  const reachedLeader = triviaOnly && winTarget > 0 && leader && leader.s >= winTarget ? leader : null;
   return (
     <div className="text-center">
       <div className="text-7xl">{correct ? "✅" : "❌"}</div>
@@ -952,11 +1035,28 @@ function TriviaRevealPanel({
       >
         {correct ? "Mark it wrong instead" : "Actually correct — give the points"}
       </button>
-      <div className="mt-4">
-        <button onClick={onNext} disabled={pending} className="btn btn-primary text-lg">
-          {last ? "See final scores 🏆" : "Next turn →"}
-        </button>
-      </div>
+      {reachedLeader ? (
+        <div className="mt-5">
+          <div className="font-display text-2xl font-black text-shimmer-gold">
+            🏁 {reachedLeader.t.name} reached {reachedLeader.s}!
+          </div>
+          <p className="mt-1 text-sm text-cream/60">Call it here, or raise the bar and keep rolling.</p>
+          <div className="mt-3 flex flex-wrap justify-center gap-2">
+            <button onClick={onEndGame} disabled={pending} className="btn btn-primary text-lg">
+              🏆 End &amp; crown {reachedLeader.t.name}
+            </button>
+            <button onClick={onKeepPlaying} disabled={pending} className="btn btn-secondary">
+              Keep playing → first to {winTarget + 10}
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="mt-4">
+          <button onClick={onNext} disabled={pending} className="btn btn-primary text-lg">
+            {last ? "See final scores 🏆" : "Next turn →"}
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -967,12 +1067,16 @@ function GameOver({
   groupId,
   gameId,
   questionsPerTeam,
+  triviaOnly = false,
+  winTarget = 0,
 }: {
   teams: TeamLite[];
   scores: Record<string, number>;
   groupId: string;
   gameId: string;
   questionsPerTeam: number;
+  triviaOnly?: boolean;
+  winTarget?: number;
 }) {
   const ranked = [...teams].sort((a, b) => (scores[b.id] ?? 0) - (scores[a.id] ?? 0));
   const top = ranked[0];
@@ -1001,25 +1105,50 @@ function GameOver({
           </div>
         ))}
       </div>
-      <div className="mt-8 flex flex-wrap justify-center gap-3">
-        <a href={`/recap/${gameId}`} className="btn btn-primary text-lg">
-          🎬 See the recap
-        </a>
-        <form action={startNextRound}>
-          <input type="hidden" name="groupId" value={groupId} />
-          <input type="hidden" name="questionsPerTeam" value={questionsPerTeam} />
-          <button type="submit" className="btn btn-secondary">
-            🔄 Play again
-          </button>
-        </form>
-        <a href={`/dashboard/g/${groupId}`} className="btn btn-ghost">
-          Back to group
-        </a>
-      </div>
-      <p className="mt-3 text-xs text-cream/40">
-        The recap has every stat, superlative and player card — easy to share. Play again reshuffles feud
-        questions and generates fresh trivia.
-      </p>
+      {triviaOnly ? (
+        <>
+          <div className="mt-8 flex flex-wrap justify-center gap-3">
+            <form action={startTriviaOnlyGame}>
+              <input type="hidden" name="groupId" value={groupId} />
+              <input type="hidden" name="winTarget" value={winTarget || 30} />
+              <button type="submit" className="btn btn-primary text-lg">
+                🎲 New trivia game
+              </button>
+            </form>
+            <a href={`/recap/${gameId}`} className="btn btn-secondary">
+              🎬 See the recap
+            </a>
+            <a href={`/dashboard/g/${groupId}`} className="btn btn-ghost">
+              Back to group
+            </a>
+          </div>
+          <p className="mt-3 text-xs text-cream/40">
+            New game keeps the same teams with a fresh 0–0 scoreboard and brand-new random questions.
+          </p>
+        </>
+      ) : (
+        <>
+          <div className="mt-8 flex flex-wrap justify-center gap-3">
+            <a href={`/recap/${gameId}`} className="btn btn-primary text-lg">
+              🎬 See the recap
+            </a>
+            <form action={startNextRound}>
+              <input type="hidden" name="groupId" value={groupId} />
+              <input type="hidden" name="questionsPerTeam" value={questionsPerTeam} />
+              <button type="submit" className="btn btn-secondary">
+                🔄 Play again
+              </button>
+            </form>
+            <a href={`/dashboard/g/${groupId}`} className="btn btn-ghost">
+              Back to group
+            </a>
+          </div>
+          <p className="mt-3 text-xs text-cream/40">
+            The recap has every stat, superlative and player card — easy to share. Play again reshuffles feud
+            questions and generates fresh trivia.
+          </p>
+        </>
+      )}
     </div>
   );
 }
