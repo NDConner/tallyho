@@ -44,6 +44,7 @@ interface Tasks {
   isOwner: boolean;
   gameDate: string | null;
   answerDeadline: string | null;
+  feudSubject: { mode: string; theme: string | null; pool: string[] } | null;
   member: { id: string; name: string; isCaptain: boolean; teamId: string | null };
   roster: { id: string; name: string }[];
   questions: Question[];
@@ -954,25 +955,37 @@ function QuestionFlow({
           <p className="mb-3 rounded-lg bg-cyan/10 px-3 py-2 text-xs text-cyan">{typeHint(q.type)}</p>
         )}
 
-        {q.type === "pick_person" && (
-          <div>
-            {tasks.roster.length > 8 && (
-              <input
-                value={optFilter}
-                onChange={(e) => setOptFilter(e.target.value)}
-                placeholder="Type a name to filter…"
-                className="input mb-2 text-sm"
-              />
-            )}
-            <div className="grid grid-cols-2 gap-2">
-              {tasks.roster
-                .filter((m) => m.name.toLowerCase().includes(optFilter.trim().toLowerCase()))
-                .map((m) => (
-                  <OptionButton key={m.id} label={m.name} selected={selected === m.name} onClick={() => saveAnswer(q.id, m.name)} disabled={locked} />
-                ))}
-            </div>
-          </div>
-        )}
+        {q.type === "pick_person" &&
+          (() => {
+            // Themed games pick from a fixed pool (athletes, Disney, …); otherwise
+            // from the group roster. Same button grid + filter either way.
+            const themed = tasks.feudSubject?.mode === "theme" ? tasks.feudSubject : null;
+            const opts = themed
+              ? themed.pool.map((n) => ({ id: n, name: n }))
+              : tasks.roster;
+            return (
+              <div>
+                {themed && (
+                  <p className="mb-2 text-xs text-cyan">🎭 Answers come from: {themed.theme}</p>
+                )}
+                {opts.length > 8 && (
+                  <input
+                    value={optFilter}
+                    onChange={(e) => setOptFilter(e.target.value)}
+                    placeholder={themed ? "Type to filter…" : "Type a name to filter…"}
+                    className="input mb-2 text-sm"
+                  />
+                )}
+                <div className="grid grid-cols-2 gap-2">
+                  {opts
+                    .filter((m) => m.name.toLowerCase().includes(optFilter.trim().toLowerCase()))
+                    .map((m) => (
+                      <OptionButton key={m.id} label={m.name} selected={selected === m.name} onClick={() => saveAnswer(q.id, m.name)} disabled={locked} />
+                    ))}
+                </div>
+              </div>
+            );
+          })()}
 
         {(q.type === "multiple_choice" || q.type === "likelihood") && (
           <div className="space-y-2">

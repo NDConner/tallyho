@@ -24,7 +24,9 @@ import {
 } from "./actions";
 import { startTriviaOnlyGame } from "@/app/play/actions";
 import { DuplicateDialog } from "@/components/DuplicateDialog";
+import { FeudSubjectEditor } from "@/components/FeudSubjectEditor";
 import { isAnswersLocked, lockReason } from "@/lib/lock";
+import { normalizeFeudSubject } from "@/lib/feud/subjects";
 import type { Group, Member, Team } from "@/lib/types";
 
 function appUrl(): string {
@@ -165,6 +167,7 @@ export default async function GroupPage({
   const answersLocked = isAnswersLocked(group);
   const lockWhy = lockReason(group);
   const deadlinePretty = prettyDeadline(deadlineIso);
+  const feudSubject = normalizeFeudSubject((group as unknown as { feud_subject?: unknown }).feud_subject);
 
   // Per-member fill-out progress. What a member owes depends on type:
   //   consensus — all of them except their one holdout
@@ -521,6 +524,18 @@ export default async function GroupPage({
                 </ul>
               </div>
             )}
+          </section>
+
+          {/* what "most likely to" answers come from — group roster or a theme */}
+          <section className="card p-5">
+            <h2 className="font-display text-lg font-bold">🎭 Feud questions are about…</h2>
+            <p className="mt-1 text-sm text-cream/55">
+              Keep &ldquo;most likely to&rdquo; answers on your own crew, or swap in a theme —
+              athletes, Disney characters, or your own list — so players pick from that pool instead.
+            </p>
+            <div className="mt-3">
+              <FeudSubjectEditor groupId={group.id} initial={feudSubject} />
+            </div>
           </section>
 
           {/* path to game night */}

@@ -10,6 +10,7 @@ import { TRIVIA_POINTS } from "@/lib/scoring";
 import { normalize } from "@/lib/match";
 import { shuffle, partition, generateJoinCode } from "@/lib/utils";
 import { deadlinePassed } from "@/lib/lock";
+import { builtinSubject, cleanPool } from "@/lib/feud/subjects";
 
 /**
  * Add a member to an existing group at any time (including after others have
@@ -334,6 +335,54 @@ export async function unclaimMember(formData: FormData) {
     .eq("id", memberId)
     .eq("group_id", groupId);
   revalidatePath(`/dashboard/g/${groupId}`);
+}
+
+// ─── Feud subject (themed answer pools) ──────────────────────────────────────
+
+/** Set what pick-a-person answers are drawn from: the group roster (mode
+ *  "group"), a built-in theme, or a custom list. Stored on groups.feud_subject
+ *  as { mode:"theme", theme, pool } (or null for the group roster). */
+export async function setFeudSubject(input: {
+  groupId: string;
+  mode: "group" | "theme";
+  builtinKey?: string | null;
+  customTheme?: string | null;
+  customEntries?: string[] | null;
+}): Promise<{ ok: boolean; error?: string }> {
+  if (!input.groupId) return { ok: false, error: "Missing group." };
+  const supabase = await createSupabaseServerClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return { ok: false, error: "Sign in first." };
+
+  if (input.mode === "group") {
+    const { error } = await supabase.from("groups").update({ feud_subject: null }).eq("id", input.groupId);
+    if (error) return { ok: false, error: error.message };
+    revalidatePath(`/dashboard/g/${input.groupId}`);
+    return { ok: true };
+  }
+
+  let theme: string;
+  let pool: string[];
+  if (input.builtinKey) {
+    const b = builtinSubject(input.builtinKey);
+    if (!b) return { ok: false, error: "Unknown theme." };
+    theme = b.label;
+    pool = b.pool;
+  } else {
+    theme = (input.customTheme ?? "").trim().slice(0, 40) || "Custom";
+    pool = cleanPool(input.customEntries ?? []);
+  }
+  if (pool.length < 2) return { ok: false, error: "Add at least 2 options to pick from." };
+
+  const { error } = await supabase
+    .from("groups")
+    .update({ feud_subject: { mode: "theme", theme, pool } })
+    .eq("id", input.groupId);
+  if (error) return { ok: false, error: error.message };
+  revalidatePath(`/dashboard/g/${input.groupId}`);
+  return { ok: true };
 }
 
 // ─── Trivia categories + topics + bank editing ───────────────────────────────

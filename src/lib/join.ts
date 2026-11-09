@@ -4,6 +4,7 @@ import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { memberHoldouts } from "@/lib/holdouts";
 import { TOPIC_CATALOG } from "@/lib/trivia/topics";
 import { isAnswersLocked } from "@/lib/lock";
+import { normalizeFeudSubject } from "@/lib/feud/subjects";
 
 // Member/captain self-service helpers. These run in API route handlers behind
 // the service-role key, gated by the group's join code (members don't auth).
@@ -34,11 +35,11 @@ export function activeCategories(trivia_categories: unknown): ActiveCategory[] {
 
 export async function lookupGroup(code: string) {
   const supabase = createSupabaseAdminClient();
+  // select("*") (not an explicit column list) so a newly-added column like
+  // feud_subject is picked up without this query breaking before its migration runs.
   const { data: group } = await supabase
     .from("groups")
-    .select(
-      "id, name, status, dynamic_note, join_code, scheduled_time, answer_deadline, trivia_categories, require_member_login",
-    )
+    .select("*")
     .eq("join_code", code.trim().toUpperCase())
     .maybeSingle();
   if (!group) return null;
@@ -154,6 +155,10 @@ export async function getMemberTasks(code: string, memberId: string, userId: str
   // Locked = the host locked it (status past "setup") OR the answer deadline passed.
   const locked = isAnswersLocked(ctx.group);
 
+  // Pick-a-person answers come from a themed pool, or null = the group roster.
+  const subj = normalizeFeudSubject((ctx.group as { feud_subject?: unknown }).feud_subject);
+  const feudSubject = subj.mode === "theme" ? { mode: subj.mode, theme: subj.theme, pool: subj.pool } : null;
+
   // What THIS member fills out:
   //  • buffer questions — never (a host hid them from the game entirely)
   //  • consensus types  — every one except the ones they're held out of
@@ -252,6 +257,7 @@ export async function getMemberTasks(code: string, memberId: string, userId: str
     isOwner,
     gameDate: ctx.group.scheduled_time ?? null,
     answerDeadline: ctx.group.answer_deadline ?? null,
+    feudSubject,
     member: {
       id: ctx.member.id,
       name: ctx.member.display_name,
