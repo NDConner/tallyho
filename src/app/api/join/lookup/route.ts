@@ -18,12 +18,14 @@ export async function POST(req: Request) {
     groupName: ctx.group.name,
     dynamicNote: ctx.group.dynamic_note,
     code: ctx.group.join_code,
+    requireLogin: Boolean((ctx.group as { require_member_login?: boolean }).require_member_login),
     members: ctx.members
       .filter((m) => m.is_playing !== false)
       .map((m) => ({
         id: m.id,
         name: m.display_name,
         isCaptain: m.is_captain,
+        claimed: Boolean((m as { user_id?: string | null }).user_id),
       })),
   });
 }

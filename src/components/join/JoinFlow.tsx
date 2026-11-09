@@ -2,11 +2,14 @@
 
 import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { Wordmark } from "@/components/Wordmark";
+import { MemberAuth } from "@/components/join/MemberAuth";
+import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 
 interface MemberLite {
   id: string;
   name: string;
   isCaptain: boolean;
+  claimed: boolean;
 }
 interface Question {
   id: string;
@@ -70,9 +73,12 @@ export function JoinFlow({ initialCode }: { initialCode?: string }) {
   const [code, setCode] = useState((initialCode ?? "").toUpperCase());
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [group, setGroup] = useState<{ groupName: string; members: MemberLite[] } | null>(null);
+  const [group, setGroup] = useState<{ groupName: string; requireLogin: boolean; members: MemberLite[] } | null>(
+    null,
+  );
   const [tasks, setTasks] = useState<Tasks | null>(null);
   const [identifyFilter, setIdentifyFilter] = useState("");
+  const [authEmail, setAuthEmail] = useState<string | null>(null);
   const didAuto = useRef(false);
 
   useEffect(() => {
@@ -82,6 +88,21 @@ export function JoinFlow({ initialCode }: { initialCode?: string }) {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Track the member's own auth session (for claiming + "signed in as").
+  useEffect(() => {
+    const supabase = createSupabaseBrowserClient();
+    supabase.auth.getUser().then(({ data }) => setAuthEmail(data.user?.email ?? null));
+    const { data: sub } = supabase.auth.onAuthStateChange((_e, session) =>
+      setAuthEmail(session?.user?.email ?? null),
+    );
+    return () => sub.subscription.unsubscribe();
+  }, []);
+
+  async function signOut() {
+    await createSupabaseBrowserClient().auth.signOut();
+    setAuthEmail(null);
+  }
 
   async function lookup(c: string) {
     setBusy(true);
@@ -97,7 +118,7 @@ export function JoinFlow({ initialCode }: { initialCode?: string }) {
         setError(data.error ?? "Couldn't find that group.");
         return;
       }
-      setGroup({ groupName: data.groupName, members: data.members });
+      setGroup({ groupName: data.groupName, requireLogin: Boolean(data.requireLogin), members: data.members });
       setPhase("identify");
     } catch {
       setError("Network error — try again.");
@@ -110,6 +131,19 @@ export function JoinFlow({ initialCode }: { initialCode?: string }) {
     setBusy(true);
     setError(null);
     try {
+      // Signed in? Claim this slot (links it to the account) before loading it.
+      if (authEmail) {
+        const claimRes = await fetch("/api/join/claim", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ code, memberId }),
+        });
+        const claimData = await claimRes.json().catch(() => ({ ok: false }));
+        if (!claimData.ok) {
+          setError(claimData.error ?? "Couldn't claim that name.");
+          return;
+        }
+      }
       const res = await fetch("/api/join/tasks", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -130,6 +164,7 @@ export function JoinFlow({ initialCode }: { initialCode?: string }) {
   function switchUser() {
     setTasks(null);
     setPhase("identify");
+    if (code) void lookup(code); // refresh claim badges
   }
 
   // Compact header on the tasks view (saves phone real estate); full on entry.
@@ -168,34 +203,72 @@ export function JoinFlow({ initialCode }: { initialCode?: string }) {
         )}
 
         {phase === "identify" && group && (
-          <div className="card p-6">
-            <p className="text-center text-sm text-cream/60">You&apos;re joining</p>
-            <h1 className="text-center font-display text-2xl font-bold">{group.groupName}</h1>
-            <p className="mt-5 mb-2 text-center label">Who are you?</p>
-            {group.members.length > 8 && (
-              <input
-                autoFocus
-                value={identifyFilter}
-                onChange={(e) => setIdentifyFilter(e.target.value)}
-                placeholder="Type your name to find yourself…"
-                className="input mb-2 text-sm"
+          <div className="space-y-4">
+            {authEmail && (
+              <div className="flex items-center justify-between gap-2 rounded-xl border border-green/30 bg-green/5 px-3 py-2 text-xs">
+                <span className="min-w-0 truncate text-green">✓ Signed in as {authEmail}</span>
+                <button onClick={signOut} className="shrink-0 text-cream/50 underline hover:text-cream">
+                  Sign out
+                </button>
+              </div>
+            )}
+
+            {!authEmail && (
+              <MemberAuth
+                code={code}
+                onAuthed={(email) => {
+                  setAuthEmail(email);
+                  void lookup(code);
+                }}
               />
             )}
-            <div className="grid grid-cols-2 gap-2">
-              {group.members
-                .filter((m) => m.name.toLowerCase().includes(identifyFilter.trim().toLowerCase()))
-                .map((m) => (
-                  <button
-                    key={m.id}
-                    onClick={() => pickMe(m.id)}
-                    disabled={busy}
-                    className="rounded-xl border border-white/10 bg-white/5 px-3 py-3 text-sm font-semibold transition hover:border-magenta hover:bg-magenta/10 hover:text-cream disabled:opacity-50"
-                  >
-                    {m.name}
-                    {m.isCaptain && <span className="ml-1">🎖️</span>}
-                  </button>
-                ))}
-            </div>
+
+            {(authEmail || !group.requireLogin) && (
+              <div className="card p-6">
+                <p className="text-center text-sm text-cream/60">You&apos;re joining</p>
+                <h1 className="text-center font-display text-2xl font-bold">{group.groupName}</h1>
+                <p className="mt-5 mb-2 text-center label">
+                  {authEmail ? "Pick your name to claim it" : "Who are you?"}
+                </p>
+                {group.members.length > 8 && (
+                  <input
+                    value={identifyFilter}
+                    onChange={(e) => setIdentifyFilter(e.target.value)}
+                    placeholder="Type your name to find yourself…"
+                    className="input mb-2 text-sm"
+                  />
+                )}
+                <div className="grid grid-cols-2 gap-2">
+                  {group.members
+                    .filter((m) => m.name.toLowerCase().includes(identifyFilter.trim().toLowerCase()))
+                    .map((m) => {
+                      const locked = m.claimed && !authEmail; // claimed name needs its owner signed in
+                      return (
+                        <button
+                          key={m.id}
+                          onClick={() => pickMe(m.id)}
+                          disabled={busy || locked}
+                          className="rounded-xl border border-white/10 bg-white/5 px-3 py-3 text-sm font-semibold transition hover:border-magenta hover:bg-magenta/10 hover:text-cream disabled:opacity-40 disabled:hover:border-white/10 disabled:hover:bg-white/5"
+                        >
+                          {m.name}
+                          {m.isCaptain && <span className="ml-1">🎖️</span>}
+                          {m.claimed && (
+                            <span className="mt-0.5 block text-[0.6rem] font-normal text-cream/40">
+                              {authEmail ? "🔒 claimed" : "🔒 sign in as them"}
+                            </span>
+                          )}
+                        </button>
+                      );
+                    })}
+                </div>
+                {!authEmail && !group.requireLogin && (
+                  <p className="mt-3 text-center text-xs text-cream/45">
+                    Signing in isn&apos;t required yet — but it keeps your answers private to you and saves your
+                    history.
+                  </p>
+                )}
+              </div>
+            )}
           </div>
         )}
 

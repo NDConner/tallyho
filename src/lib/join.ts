@@ -34,7 +34,9 @@ export async function lookupGroup(code: string) {
   const supabase = createSupabaseAdminClient();
   const { data: group } = await supabase
     .from("groups")
-    .select("id, name, status, dynamic_note, join_code, scheduled_time, answer_deadline, trivia_categories")
+    .select(
+      "id, name, status, dynamic_note, join_code, scheduled_time, answer_deadline, trivia_categories, require_member_login",
+    )
     .eq("join_code", code.trim().toUpperCase())
     .maybeSingle();
   if (!group) return null;
@@ -42,7 +44,7 @@ export async function lookupGroup(code: string) {
   const [{ data: members }, { data: teams }] = await Promise.all([
     supabase
       .from("members")
-      .select("id, display_name, is_captain, team_id, is_playing")
+      .select("id, display_name, is_captain, team_id, is_playing, user_id, claim_email")
       .eq("group_id", group.id)
       .order("created_at"),
     supabase
