@@ -8,7 +8,8 @@ import { regenerateTriviaBank } from "@/lib/trivia/regenerate";
 import { STARTER_POOL, CATEGORY_OF_TOPIC } from "@/lib/trivia/topics";
 import { TRIVIA_POINTS } from "@/lib/scoring";
 import { normalize } from "@/lib/match";
-import { shuffle, partition } from "@/lib/utils";
+import { shuffle, partition, generateJoinCode } from "@/lib/utils";
+import { deadlinePassed } from "@/lib/lock";
 
 /**
  * Add a member to an existing group at any time (including after others have
@@ -203,14 +204,24 @@ export async function setAnswerLock(formData: FormData) {
     data: { user },
   } = await supabase.auth.getUser();
   if (!user) return;
-  const { data: g } = await supabase.from("groups").select("status").eq("id", groupId).single();
+  const { data: g } = await supabase
+    .from("groups")
+    .select("status, answer_deadline")
+    .eq("id", groupId)
+    .single();
   if (!g) return;
   if (lock) {
-    // Only lock from the open "setup" state; never stomp a live/done game.
+    // Manual lock from the open "setup" state; never stomp a live/done game.
     if (g.status === "setup") await supabase.from("groups").update({ status: "ready" }).eq("id", groupId);
   } else {
-    // Reopen only from a locked-but-not-yet-played state.
-    if (g.status === "ready") await supabase.from("groups").update({ status: "setup" }).eq("id", groupId);
+    // Reopen to "setup". If the answer deadline has already passed, clear it so it
+    // doesn't instantly re-lock — "open it back up" should actually reopen. A still-
+    // future deadline is kept (the host only un-did an early manual lock).
+    if (g.status === "ready" || g.status === "setup") {
+      const update: { status: string; answer_deadline?: null } = { status: "setup" };
+      if (deadlinePassed(g.answer_deadline)) update.answer_deadline = null;
+      await supabase.from("groups").update(update).eq("id", groupId);
+    }
   }
   revalidatePath(`/dashboard/g/${groupId}`);
 }
@@ -504,4 +515,324 @@ export async function addMoreTrivia(input: { groupId: string; teamId: string; n:
   }
   revalidatePath(`/dashboard/g/${input.groupId}/trivia`);
   revalidatePath(`/dashboard/g/${input.groupId}`);
+}
+
+// ─── Close out / reopen a game night ─────────────────────────────────────────
+
+/** Wrap up a group's game night: mark the group "closed" (done) and finish any
+ *  lingering active/paused game so nothing still reads as "in progress". The
+ *  group page then shows the closed, recap-focused view. */
+export async function closeOutGame(formData: FormData) {
+  const groupId = String(formData.get("groupId") || "");
+  if (!groupId) return;
+  const supabase = await createSupabaseServerClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return;
+  await supabase
+    .from("games")
+    .update({ status: "done" })
+    .eq("group_id", groupId)
+    .in("status", ["active", "paused"]);
+  await supabase.from("groups").update({ status: "done" }).eq("id", groupId);
+  revalidatePath(`/dashboard/g/${groupId}`);
+  revalidatePath("/dashboard");
+}
+
+/** Reopen a closed group back to setup — edit the roster/questions or run it
+ *  again with the same crew. (To keep the finished game's results and start
+ *  clean, use Duplicate instead.) */
+export async function reopenGroup(formData: FormData) {
+  const groupId = String(formData.get("groupId") || "");
+  if (!groupId) return;
+  const supabase = await createSupabaseServerClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return;
+  await supabase.from("groups").update({ status: "setup" }).eq("id", groupId);
+  revalidatePath(`/dashboard/g/${groupId}`);
+  revalidatePath("/dashboard");
+}
+
+// ─── Customized duplication ──────────────────────────────────────────────────
+
+export interface DuplicateOptions {
+  groupId: string;
+  name: string;
+  includePlayers: boolean; // member names, teams, captains (fresh, unclaimed)
+  includeQuestions: boolean; // feud questions
+  includeResponses: boolean; // players' saved answers + holdouts (needs players + questions)
+  includeTopics: boolean; // captains' trivia topic picks
+  includeTriviaBank: boolean; // generated trivia question bank
+}
+
+/**
+ * Clone a group into a brand-new one, copying exactly the parts the host picked —
+ * so they can play again with the same setup, or use it as a baseline for a whole
+ * new crew. Always fresh: new join code, "setup" status, no schedule, and every
+ * roster slot unclaimed (new people sign in and claim). Redirects to the copy.
+ */
+export async function duplicateGroup(
+  opts: DuplicateOptions,
+): Promise<{ ok: false; error: string } | void> {
+  const supabase = await createSupabaseServerClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return { ok: false, error: "You must be signed in." };
+
+  const srcId = opts.groupId;
+  const { data: src } = await supabase.from("groups").select("*").eq("id", srcId).single();
+  if (!src) return { ok: false, error: "Group not found." };
+
+  // Dependency fixups: answers need both players and questions to remap onto.
+  const includePlayers = opts.includePlayers;
+  const includeQuestions = opts.includeQuestions;
+  const includeResponses = opts.includeResponses && includePlayers && includeQuestions;
+  const includeTopics = opts.includeTopics;
+  const includeTriviaBank = opts.includeTriviaBank;
+
+  const name = (opts.name?.trim() || `${src.name} (copy)`).slice(0, 80);
+
+  // 1) The new group (fresh code + setup + no schedule).
+  let newGroupId: string | null = null;
+  for (let attempt = 0; attempt < 6 && !newGroupId; attempt++) {
+    const join_code = generateJoinCode(6);
+    const { data, error } = await supabase
+      .from("groups")
+      .insert({
+        created_by: user.id,
+        name,
+        category: src.category,
+        category_custom_desc: src.category_custom_desc ?? null,
+        dynamic_note: src.dynamic_note ?? "",
+        num_teams: src.num_teams ?? 2,
+        num_rounds: src.num_rounds ?? 1,
+        team_assignment: src.team_assignment ?? "random",
+        trivia_categories: src.trivia_categories ?? null,
+        require_member_login: src.require_member_login ?? true,
+        join_code,
+        status: "setup",
+      })
+      .select("id")
+      .single();
+    if (!error && data) {
+      newGroupId = data.id as string;
+      break;
+    }
+    if (error && error.code !== "23505") return { ok: false, error: error.message };
+  }
+  if (!newGroupId) return { ok: false, error: "Could not generate a unique join code." };
+
+  // 2) Teams — always copied (the skeleton trivia + captaincy hang off). Mapped by
+  //    the stable team_index so trivia can re-point even without players.
+  const { data: srcTeams } = await supabase
+    .from("teams")
+    .select("*")
+    .eq("group_id", srcId)
+    .order("team_index");
+  const teamOldToNew = new Map<string, string>();
+  if (srcTeams && srcTeams.length) {
+    const { data: newTeams } = await supabase
+      .from("teams")
+      .insert(
+        srcTeams.map((t) => ({
+          group_id: newGroupId,
+          name: t.name,
+          team_index: t.team_index,
+          emoji: t.emoji ?? null,
+          logo_url: includePlayers ? (t.logo_url ?? null) : null,
+        })),
+      )
+      .select("id, team_index");
+    const newByIndex = new Map<number, string>();
+    for (const t of newTeams ?? []) newByIndex.set(t.team_index as number, t.id as string);
+    for (const t of srcTeams) {
+      const nid = newByIndex.get(t.team_index as number);
+      if (nid) teamOldToNew.set(t.id as string, nid);
+    }
+  }
+
+  // 3) Members (if players). Fresh, unclaimed slots. Bulk insert returns rows in
+  //    input order, so we zip old→new ids by index to remap captains/answers.
+  const memberOldToNew = new Map<string, string>();
+  if (includePlayers) {
+    const { data: srcMembers } = await supabase
+      .from("members")
+      .select("*")
+      .eq("group_id", srcId)
+      .order("created_at");
+    const list = srcMembers ?? [];
+    if (list.length) {
+      const { data: newMembers } = await supabase
+        .from("members")
+        .insert(
+          list.map((m) => ({
+            group_id: newGroupId,
+            display_name: m.display_name,
+            team_id: m.team_id ? (teamOldToNew.get(m.team_id) ?? null) : null,
+            is_captain: Boolean(m.is_captain),
+            is_playing: m.is_playing !== false,
+          })),
+        )
+        .select("id");
+      const inserted = newMembers ?? [];
+      list.forEach((m, i) => {
+        if (inserted[i]) memberOldToNew.set(m.id as string, inserted[i].id as string);
+      });
+      // Re-point each team's captain to the copied member.
+      for (const t of srcTeams ?? []) {
+        const cap = (t as { captain_member_id?: string | null }).captain_member_id;
+        const newTeam = teamOldToNew.get(t.id as string);
+        const newCap = cap ? memberOldToNew.get(cap) : null;
+        if (newTeam && newCap)
+          await supabase.from("teams").update({ captain_member_id: newCap }).eq("id", newTeam);
+      }
+    }
+  }
+
+  // 4) Feud questions (if questions). guess_what targets are remapped when players
+  //    came along, otherwise dropped (the host re-picks a target).
+  const questionOldToNew = new Map<string, string>();
+  if (includeQuestions) {
+    const { data: srcQs } = await supabase
+      .from("feud_questions")
+      .select("*")
+      .eq("group_id", srcId)
+      .order("created_at");
+    const list = srcQs ?? [];
+    if (list.length) {
+      const { data: newQs } = await supabase
+        .from("feud_questions")
+        .insert(
+          list.map((q) => ({
+            group_id: newGroupId,
+            prompt: q.prompt,
+            type: q.type,
+            options: q.options ?? null,
+            target_member_id:
+              includePlayers && q.target_member_id
+                ? (memberOldToNew.get(q.target_member_id) ?? null)
+                : null,
+            source: q.source ?? "admin",
+            ai_recommended: Boolean(q.ai_recommended),
+            is_buffer: Boolean(q.is_buffer),
+            usable: q.usable ?? null,
+            consensus_score: q.consensus_score ?? null,
+            top_bucket: q.top_bucket ?? null,
+          })),
+        )
+        .select("id");
+      const inserted = newQs ?? [];
+      list.forEach((q, i) => {
+        if (inserted[i]) questionOldToNew.set(q.id as string, inserted[i].id as string);
+      });
+    }
+  }
+
+  // 5) Players' saved answers + holdout assignments (if responses).
+  if (includeResponses && questionOldToNew.size) {
+    const { data: srcResp } = await supabase
+      .from("feud_responses")
+      .select("question_id, member_id, raw_answer, normalized_bucket")
+      .in("question_id", [...questionOldToNew.keys()]);
+    const respRows: {
+      question_id: string;
+      member_id: string;
+      raw_answer: string;
+      normalized_bucket: string;
+    }[] = [];
+    for (const r of srcResp ?? []) {
+      const q = questionOldToNew.get(r.question_id as string);
+      const m = memberOldToNew.get(r.member_id as string);
+      if (q && m)
+        respRows.push({
+          question_id: q,
+          member_id: m,
+          raw_answer: r.raw_answer as string,
+          normalized_bucket: (r.normalized_bucket as string) ?? (r.raw_answer as string),
+        });
+    }
+    if (respRows.length) await supabase.from("feud_responses").insert(respRows);
+
+    const { data: srcAsg } = await supabase
+      .from("feud_question_assignments")
+      .select("question_id, member_id")
+      .eq("group_id", srcId);
+    const asgRows: { group_id: string; question_id: string; member_id: string }[] = [];
+    for (const a of srcAsg ?? []) {
+      const q = questionOldToNew.get(a.question_id as string);
+      const m = memberOldToNew.get(a.member_id as string);
+      if (q && m) asgRows.push({ group_id: newGroupId, question_id: q, member_id: m });
+    }
+    if (asgRows.length) await supabase.from("feud_question_assignments").insert(asgRows);
+  }
+
+  // 6) Trivia topics (captains' picks) — re-pointed by team.
+  if (includeTopics && teamOldToNew.size) {
+    const { data: srcTopics } = await supabase
+      .from("trivia_topics")
+      .select("team_id, category, name, selected, source")
+      .eq("group_id", srcId);
+    const rows: {
+      group_id: string;
+      team_id: string | null;
+      category: string;
+      name: string;
+      selected: boolean;
+      source: string;
+    }[] = [];
+    for (const t of srcTopics ?? []) {
+      const team = t.team_id ? (teamOldToNew.get(t.team_id as string) ?? null) : null;
+      rows.push({
+        group_id: newGroupId,
+        team_id: team,
+        category: t.category as string,
+        name: t.name as string,
+        selected: (t.selected as boolean) ?? true,
+        source: (t.source as string) ?? "custom",
+      });
+    }
+    if (rows.length) await supabase.from("trivia_topics").insert(rows);
+  }
+
+  // 7) Trivia bank — re-pointed by team, every question reset to unused.
+  if (includeTriviaBank && teamOldToNew.size) {
+    const { data: srcTrivia } = await supabase
+      .from("trivia_questions")
+      .select("team_id, topic, prompt, correct_answer, accepted_variants, point_value, round_no")
+      .eq("group_id", srcId);
+    const rows: {
+      group_id: string;
+      team_id: string;
+      topic: string;
+      prompt: string;
+      correct_answer: string;
+      accepted_variants: string[];
+      point_value: number;
+      round_no: number | null;
+      used: boolean;
+    }[] = [];
+    for (const t of srcTrivia ?? []) {
+      const team = teamOldToNew.get(t.team_id as string);
+      if (!team) continue;
+      rows.push({
+        group_id: newGroupId,
+        team_id: team,
+        topic: t.topic as string,
+        prompt: t.prompt as string,
+        correct_answer: t.correct_answer as string,
+        accepted_variants: (t.accepted_variants as string[]) ?? [],
+        point_value: (t.point_value as number) ?? TRIVIA_POINTS,
+        round_no: (t.round_no as number | null) ?? 1,
+        used: false,
+      });
+    }
+    if (rows.length) await supabase.from("trivia_questions").insert(rows);
+  }
+
+  revalidatePath("/dashboard");
+  redirect(`/dashboard/g/${newGroupId}?created=1`);
 }

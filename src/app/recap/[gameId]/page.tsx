@@ -32,6 +32,7 @@ export default async function RecapPage({ params }: { params: Promise<{ gameId: 
   // sent to the client only when the signed-in viewer owns this game's group, so
   // the public recap link never leaks anyone's answers.
   let analytics: HostAnalytics | null = null;
+  let groupHref: string | null = null; // host-only link back to this game's home
   try {
     const supabase = await createSupabaseServerClient();
     const {
@@ -48,6 +49,7 @@ export default async function RecapPage({ params }: { params: Promise<{ gameId: 
           .maybeSingle();
         if (group && group.created_by === user.id) {
           analytics = await buildHostAnalytics(gameId);
+          groupHref = `/dashboard/g/${game.group_id}`;
         }
       }
     }
@@ -55,5 +57,5 @@ export default async function RecapPage({ params }: { params: Promise<{ gameId: 
     /* never block the public recap on the analytics path */
   }
 
-  return <RecapView recap={recap} analytics={analytics} />;
+  return <RecapView recap={recap} analytics={analytics} groupHref={groupHref} />;
 }

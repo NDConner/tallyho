@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { cn } from "@/lib/utils";
+import { Wordmark } from "@/components/Wordmark";
 import type { Recap, RecapAvatar, HostAnalytics, AnalyticsQuestion, AnalyticsPerson } from "@/lib/recap";
 
 const TEAM_BG = ["bg-magenta", "bg-cyan", "bg-gold", "bg-green"];
@@ -47,7 +48,15 @@ function Stat({ label, value }: { label: string; value: number }) {
   );
 }
 
-export function RecapView({ recap, analytics }: { recap: Recap; analytics?: HostAnalytics | null }) {
+export function RecapView({
+  recap,
+  analytics,
+  groupHref,
+}: {
+  recap: Recap;
+  analytics?: HostAnalytics | null;
+  groupHref?: string | null;
+}) {
   const [view, setView] = useState<View>("overview");
   const [copied, setCopied] = useState(false);
 
@@ -83,6 +92,18 @@ export function RecapView({ recap, analytics }: { recap: Recap; analytics?: Host
 
   return (
     <main className="mx-auto w-full max-w-4xl px-4 py-8">
+      {/* nav: back to the Tallyho home, and (host) back to this game's home */}
+      <div className="mb-6 flex items-center justify-between gap-3">
+        <a href="/" aria-label="Tallyho home">
+          <Wordmark size="sm" />
+        </a>
+        {groupHref && (
+          <a href={groupHref} className="text-sm text-cream/50 hover:text-cream">
+            ⌂ Game home
+          </a>
+        )}
+      </div>
+
       {/* header */}
       <div className="text-center">
         <div className="label">Tallyho · Game recap</div>

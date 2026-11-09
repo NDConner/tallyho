@@ -19,12 +19,42 @@ import {
   setAnswerLock,
   setRequireMemberLogin,
   unclaimMember,
+  closeOutGame,
+  reopenGroup,
 } from "./actions";
 import { startTriviaOnlyGame } from "@/app/play/actions";
+import { DuplicateDialog } from "@/components/DuplicateDialog";
+import { isAnswersLocked, lockReason } from "@/lib/lock";
 import type { Group, Member, Team } from "@/lib/types";
 
 function appUrl(): string {
   return process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
+}
+
+const STATUS_LABEL: Record<string, string> = {
+  setup: "open",
+  ready: "locked",
+  live: "live",
+  done: "closed",
+};
+const STATUS_CHIP: Record<string, string> = {
+  setup: "border-cyan/30 text-cyan",
+  ready: "border-green/30 text-green",
+  live: "border-magenta/30 text-magenta-soft",
+  done: "border-white/20 text-cream/50",
+};
+
+function prettyDeadline(iso: string | null): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return null;
+  return d.toLocaleString(undefined, {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
 }
 
 export default async function GroupPage({
@@ -130,9 +160,11 @@ export default async function GroupPage({
 
   const link = joinLink(group, appUrl());
   const hostReady = (assignCount ?? 0) > 0 && (triviaCount ?? 0) > 0;
-  // Answers are open only in "setup". The host can lock them (→ "ready") so no
-  // one can submit or change anything before the game.
-  const answersLocked = group.status !== "setup";
+  // Answers lock when the host locks (status past "setup") OR the deadline passes.
+  const deadlineIso = (group as Group & { answer_deadline: string | null }).answer_deadline ?? null;
+  const answersLocked = isAnswersLocked(group);
+  const lockWhy = lockReason(group);
+  const deadlinePretty = prettyDeadline(deadlineIso);
 
   // Per-member fill-out progress. What a member owes depends on type:
   //   consensus — all of them except their one holdout
@@ -222,11 +254,100 @@ export default async function GroupPage({
   ];
   const nextStepN = steps.find((s) => !s.done)?.n ?? 5;
 
+  // ── Closed game night ──────────────────────────────────────────────────────
+  // A finished group reads as "closed": recap + duplicate + reopen, no live-game
+  // or setup controls. (A game formally ends → group status "done"; the host can
+  // also close it out from the live view.)
+  if (group.status === "done") {
+    return (
+      <div className="mx-auto max-w-2xl">
+        <div className="flex items-center justify-between gap-3">
+          <Link href="/dashboard" className="text-sm text-cream/50 hover:text-cream">
+            ← All groups
+          </Link>
+          <Link href="/me" className="text-sm text-cream/50 hover:text-cream">
+            🏠 My home
+          </Link>
+        </div>
+
+        <div className="mt-4 flex items-center gap-3">
+          <h1 className="font-display text-4xl font-black">{group.name}</h1>
+          <span className="chip cursor-default border border-white/20 text-xs text-cream/50">
+            closed
+          </span>
+        </div>
+        <p className="mt-1 text-sm text-cream/55">
+          {CATEGORY_LABELS[group.category] ?? group.category} · this game night is wrapped
+        </p>
+
+        <section className="card mt-6 border-gold/30 bg-gold/5 p-6 text-center">
+          <div className="text-4xl">🎉</div>
+          <h2 className="mt-2 font-display text-2xl font-black">That&apos;s a wrap!</h2>
+          <p className="mt-1 text-sm text-cream/60">
+            The game is closed. Relive it in the recap, or spin up a fresh copy to run it back.
+          </p>
+          {lastDoneGame && (
+            <a href={`/recap/${lastDoneGame.id}`} className="btn btn-primary mt-4">
+              🎬 Open the recap
+            </a>
+          )}
+        </section>
+
+        <section className="card mt-6 p-5">
+          <DuplicateDialog groupId={group.id} groupName={group.name} defaultOpen />
+        </section>
+
+        <section className="card mt-6 p-5">
+          <h2 className="font-display text-lg font-bold">Who played</h2>
+          <div className="mt-3 grid gap-3 sm:grid-cols-2">
+            {teams.map((t) => (
+              <div key={t.id} className="rounded-xl border border-white/10 bg-white/5 p-3">
+                <h3 className="font-display font-bold">{t.name}</h3>
+                <ul className="mt-1 space-y-0.5 text-sm text-cream/70">
+                  {players
+                    .filter((p) => p.team_id === t.id)
+                    .map((p) => (
+                      <li key={p.id}>
+                        {p.display_name}
+                        {p.is_captain && " 🎖️"}
+                      </li>
+                    ))}
+                </ul>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <section className="card mt-6 p-5">
+          <h2 className="font-display text-lg font-bold">Reopen or remove</h2>
+          <p className="mt-1 text-sm text-cream/55">
+            Reopen to edit this same group and play again (keeps every answer, question and score). Or
+            delete it for good.
+          </p>
+          <div className="mt-3 flex flex-wrap items-center gap-4">
+            <form action={reopenGroup}>
+              <input type="hidden" name="groupId" value={group.id} />
+              <button type="submit" className="btn btn-secondary text-sm">
+                ↩ Reopen for setup
+              </button>
+            </form>
+            <GroupAdmin groupId={group.id} name={group.name} />
+          </div>
+        </section>
+      </div>
+    );
+  }
+
   return (
     <div>
-      <Link href="/dashboard" className="text-sm text-cream/50 hover:text-cream">
-        ← All groups
-      </Link>
+      <div className="flex items-center justify-between gap-3">
+        <Link href="/dashboard" className="text-sm text-cream/50 hover:text-cream">
+          ← All groups
+        </Link>
+        <Link href="/me" className="text-sm text-cream/50 hover:text-cream">
+          🏠 My home
+        </Link>
+      </div>
 
       {created && (
         <div className="mt-3 rounded-xl border border-green/30 bg-green/10 px-4 py-3 text-sm text-green">
@@ -238,7 +359,16 @@ export default async function GroupPage({
       {/* header */}
       <div className="mt-4 flex flex-wrap items-end justify-between gap-4">
         <div>
-          <h1 className="font-display text-4xl font-black">{group.name}</h1>
+          <div className="flex flex-wrap items-center gap-3">
+            <h1 className="font-display text-4xl font-black">{group.name}</h1>
+            <span
+              className={
+                "chip cursor-default border text-xs " + (STATUS_CHIP[group.status] ?? STATUS_CHIP.setup)
+              }
+            >
+              {STATUS_LABEL[group.status] ?? group.status}
+            </span>
+          </div>
           <p className="mt-1 text-sm text-cream/55">
             {CATEGORY_LABELS[group.category] ?? group.category}
             {group.dynamic_note ? ` · ${group.dynamic_note}` : ""}
@@ -283,7 +413,7 @@ export default async function GroupPage({
             </section>
           )}
 
-          {/* answer lock */}
+          {/* answer lock — manual, or automatic at the host's deadline */}
           <section
             className={
               "card p-5 " + (answersLocked ? "border-magenta/40 bg-magenta/5" : "border-green/30 bg-green/5")
@@ -295,21 +425,27 @@ export default async function GroupPage({
                   {answersLocked ? "🔒 Answers are locked" : "🟢 Answers are open"}
                 </h2>
                 <p className="mt-1 text-sm text-cream/60">
-                  {answersLocked
-                    ? "Everyone can still review their answers, but no one can submit or change anything (answers, topics, team names, or logos)."
-                    : "Members can still submit and edit their answers from their phones. Lock them when everyone's done so nothing changes before the game."}
+                  {lockWhy === "played"
+                    ? "The game has started — everyone's answers are locked in."
+                    : lockWhy === "manual"
+                      ? "You locked these in. Everyone can still review their own, but nothing changes — reopen if someone still needs to finish."
+                      : lockWhy === "deadline"
+                        ? `The deadline passed${deadlinePretty ? ` (${deadlinePretty})` : ""}, so answers locked automatically. Reopen to let someone finish.`
+                        : deadlinePretty
+                          ? `Members can submit and edit from their phones. These auto-lock at your deadline (${deadlinePretty}) — or lock them now.`
+                          : "Members can submit and edit from their phones. Lock them when everyone's done, or set a deadline above to auto-lock."}
                 </p>
               </div>
-              {group.status === "setup" && (
+              {!answersLocked && group.status === "setup" && (
                 <form action={setAnswerLock}>
                   <input type="hidden" name="groupId" value={group.id} />
                   <input type="hidden" name="lock" value="1" />
                   <button type="submit" className="btn btn-primary text-sm whitespace-nowrap">
-                    🔒 Lock answers
+                    🔒 Lock now
                   </button>
                 </form>
               )}
-              {group.status === "ready" && (
+              {answersLocked && (group.status === "setup" || group.status === "ready") && (
                 <form action={setAnswerLock}>
                   <input type="hidden" name="groupId" value={group.id} />
                   <input type="hidden" name="lock" value="0" />
@@ -703,6 +839,25 @@ export default async function GroupPage({
             </section>
           )}
 
+          {/* wrap up a game that's underway (fixes a game stuck on "live") */}
+          {group.status === "live" && (
+            <section className="card border-magenta/30 bg-magenta/5 p-5">
+              <h2 className="font-display text-lg font-bold">🏁 Wrap up game night</h2>
+              <p className="mt-1 text-sm text-cream/55">
+                Done playing? Close it out — the group moves to{" "}
+                <span className="font-semibold">closed</span>, the live-game and setup controls tuck
+                away, and you&apos;re left with just the recap. You can always reopen or duplicate it
+                later.
+              </p>
+              <form action={closeOutGame} className="mt-3">
+                <input type="hidden" name="groupId" value={group.id} />
+                <button type="submit" className="btn btn-primary text-sm">
+                  🏁 Close out game night
+                </button>
+              </form>
+            </section>
+          )}
+
           {/* last game recap — only for a FINISHED game, so an in-progress game's
               empty recap never shows up here (that's what sent the host to a recap
               instead of back into their game). */}
@@ -718,6 +873,11 @@ export default async function GroupPage({
               </a>
             </section>
           )}
+
+          {/* duplicate — run it back, or use as a baseline for a new group */}
+          <section className="card p-5">
+            <DuplicateDialog groupId={group.id} groupName={group.name} />
+          </section>
         </div>
 
         {/* right: invites */}

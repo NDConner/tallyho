@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { authorizeMember, currentUserId } from "@/lib/join";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
+import { isAnswersLocked } from "@/lib/lock";
 
 export const runtime = "nodejs";
 
@@ -22,7 +23,7 @@ export async function POST(req: Request) {
   const access = await authorizeMember(code, memberId, userId);
   if (!access.ok) return NextResponse.json({ ok: false, error: access.error }, { status: access.status });
   const ctx = access;
-  if (ctx.group.status !== "setup") {
+  if (isAnswersLocked(ctx.group)) {
     return NextResponse.json({ ok: false, error: "locked" }, { status: 423 });
   }
   if (!ctx.member.is_captain || ctx.member.team_id !== teamId) {

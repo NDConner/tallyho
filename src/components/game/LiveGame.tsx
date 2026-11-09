@@ -419,6 +419,7 @@ export function LiveGame(p: LiveGamePayload) {
     <div className="mx-auto flex min-h-screen max-w-4xl flex-col px-4 py-4">
       <TopBar
         groupName={p.groupName}
+        groupId={p.groupId}
         cursor={cursor}
         total={total}
         paused={paused}
@@ -764,6 +765,7 @@ function renderOptions(q?: FeudQ) {
 
 function TopBar({
   groupName,
+  groupId,
   cursor,
   total,
   paused,
@@ -778,6 +780,7 @@ function TopBar({
   phase,
 }: {
   groupName: string;
+  groupId: string;
   cursor: number;
   total: number;
   paused: boolean;
@@ -816,9 +819,23 @@ function TopBar({
             </button>
           </>
         )}
+        <a
+          href="/dashboard"
+          title="Tallyho home — all your games"
+          aria-label="Tallyho home"
+          className="btn btn-ghost px-2 py-1 text-xs"
+        >
+          ⌂
+        </a>
         <div className="min-w-0 truncate text-cream/60">
-          <span className="font-display font-bold text-cream">{groupName}</span> · Q{" "}
-          {Math.min(cursor + 1, total)}/{total}
+          <a
+            href={`/dashboard/g/${groupId}`}
+            title="Back to this game's home"
+            className="font-display font-bold text-cream hover:text-cyan hover:underline"
+          >
+            {groupName}
+          </a>{" "}
+          · Q {Math.min(cursor + 1, total)}/{total}
         </div>
       </div>
       <div className="flex shrink-0 items-center gap-2">

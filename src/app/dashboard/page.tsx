@@ -11,6 +11,12 @@ const STATUS_STYLE: Record<string, string> = {
   live: "border-magenta/30 bg-magenta/10 text-magenta-soft",
   done: "border-white/20 bg-white/5 text-cream/50",
 };
+const STATUS_LABEL: Record<string, string> = {
+  setup: "open",
+  ready: "locked",
+  live: "live",
+  done: "closed",
+};
 
 export default async function DashboardPage() {
   const supabase = await createSupabaseServerClient();
@@ -35,6 +41,9 @@ export default async function DashboardPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <Link href="/me" className="btn btn-ghost whitespace-nowrap">
+            🏠 Your home
+          </Link>
           <form action={seedDemoGroup}>
             <button type="submit" className="btn btn-ghost whitespace-nowrap">
               🎲 Demo group
@@ -80,7 +89,7 @@ export default async function DashboardPage() {
                 <span
                   className={`chip cursor-default border ${STATUS_STYLE[g.status] ?? STATUS_STYLE.setup}`}
                 >
-                  {g.status}
+                  {STATUS_LABEL[g.status] ?? g.status}
                 </span>
               </div>
               <p className="mt-1 text-sm text-cream/55">

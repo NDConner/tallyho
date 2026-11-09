@@ -3,6 +3,7 @@ import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { memberHoldouts } from "@/lib/holdouts";
 import { TOPIC_CATALOG } from "@/lib/trivia/topics";
+import { isAnswersLocked } from "@/lib/lock";
 
 // Member/captain self-service helpers. These run in API route handlers behind
 // the service-role key, gated by the group's join code (members don't auth).
@@ -150,7 +151,8 @@ export async function getMemberTasks(code: string, memberId: string, userId: str
   // answer values from the LEGACY code+name flow (no login), so no one can snoop
   // by picking another name. A verified owner (signed in + claimed this slot) is
   // safely shown their OWN answers even when locked — it's provably them.
-  const locked = ctx.group.status !== "setup";
+  // Locked = the host locked it (status past "setup") OR the answer deadline passed.
+  const locked = isAnswersLocked(ctx.group);
 
   // What THIS member fills out:
   //  • buffer questions — never (a host hid them from the game entirely)

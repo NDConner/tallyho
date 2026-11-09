@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { authorizeMember, currentUserId } from "@/lib/join";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
+import { isAnswersLocked } from "@/lib/lock";
 
 export async function POST(req: Request) {
   const { code, memberId, questionId, answer } = await req.json().catch(() => ({}));
@@ -12,8 +13,8 @@ export async function POST(req: Request) {
   const access = await authorizeMember(String(code), String(memberId), userId);
   if (!access.ok) return NextResponse.json({ ok: false, error: access.error }, { status: access.status });
   const ctx = access;
-  // Host has locked answers — nobody can submit or change anything.
-  if (ctx.group.status !== "setup") {
+  // Answers locked (host locked, or the deadline passed) — no submits or changes.
+  if (isAnswersLocked(ctx.group)) {
     return NextResponse.json({ ok: false, error: "locked" }, { status: 423 });
   }
 
