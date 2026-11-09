@@ -1,5 +1,6 @@
 import "server-only";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
+import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { memberHoldouts } from "@/lib/holdouts";
 import { TOPIC_CATALOG } from "@/lib/trivia/topics";
 
@@ -64,9 +65,72 @@ export async function validateMember(code: string, memberId: string) {
   return { ...ctx, member };
 }
 
-export async function getMemberTasks(code: string, memberId: string) {
-  const ctx = await validateMember(code, memberId);
-  if (!ctx) return null;
+/** The signed-in member's auth id, or null (members on the legacy flow have none). */
+export async function currentUserId(): Promise<string | null> {
+  try {
+    const supabase = await createSupabaseServerClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    return user?.id ?? null;
+  } catch {
+    return null;
+  }
+}
+
+type MemberRow = Awaited<ReturnType<typeof lookupGroup>> extends infer C
+  ? C extends { members: (infer M)[] }
+    ? M
+    : never
+  : never;
+export type MemberAccess =
+  | {
+      ok: true;
+      group: NonNullable<Awaited<ReturnType<typeof lookupGroup>>>["group"];
+      members: MemberRow[];
+      teams: NonNullable<Awaited<ReturnType<typeof lookupGroup>>>["teams"];
+      member: MemberRow;
+      isOwner: boolean; // the slot is claimed AND this caller owns it
+    }
+  | { ok: false; status: number; error: string };
+
+/**
+ * The single gate for every member read/write. A claimed slot can ONLY be
+ * touched by the account that claimed it; an unclaimed slot is open on the
+ * legacy code+name flow unless the group requires login. `userId` is the caller's
+ * authenticated id (from currentUserId), or null when they aren't signed in.
+ */
+export async function authorizeMember(
+  code: string,
+  memberId: string,
+  userId: string | null,
+): Promise<MemberAccess> {
+  const ctx = await lookupGroup(code);
+  if (!ctx) return { ok: false, status: 404, error: "No group found for that code." };
+  const member = ctx.members.find((m) => m.id === memberId) as MemberRow | undefined;
+  if (!member || (member as { is_playing?: boolean }).is_playing === false) {
+    return { ok: false, status: 400, error: "Pick a playing name." };
+  }
+  const ownerId = (member as { user_id?: string | null }).user_id ?? null;
+  const requireLogin = Boolean((ctx.group as { require_member_login?: boolean }).require_member_login);
+  if (ownerId) {
+    if (ownerId !== userId) {
+      return { ok: false, status: 403, error: "That name belongs to someone else's account." };
+    }
+    return { ok: true, group: ctx.group, members: ctx.members, teams: ctx.teams, member, isOwner: true };
+  }
+  // Unclaimed slot.
+  if (requireLogin) {
+    return { ok: false, status: 401, error: "Sign in and claim your spot first." };
+  }
+  return { ok: true, group: ctx.group, members: ctx.members, teams: ctx.teams, member, isOwner: false };
+}
+
+export async function getMemberTasks(code: string, memberId: string, userId: string | null = null) {
+  const access = await authorizeMember(code, memberId, userId);
+  if (!access.ok) return null;
+  const ctx = access;
+  const isOwner = access.isOwner;
   const supabase = createSupabaseAdminClient();
 
   const holdoutSet = await memberHoldouts(supabase, ctx.group.id, memberId);
@@ -82,10 +146,10 @@ export async function getMemberTasks(code: string, memberId: string) {
   const answerByQ = new Map<string, string>();
   for (const r of responses ?? []) answerByQ.set(r.question_id, r.raw_answer);
 
-  // Answers are open only while the group is in "setup". Once locked, nobody can
-  // change anything — and, crucially, we never hand back saved answers, because
-  // members identify by picking a name (no login), so returning answers would
-  // let anyone snoop on anyone else by selecting their name.
+  // Once the group is locked, nobody can change anything. We also hide saved
+  // answer values from the LEGACY code+name flow (no login), so no one can snoop
+  // by picking another name. A verified owner (signed in + claimed this slot) is
+  // safely shown their OWN answers even when locked — it's provably them.
   const locked = ctx.group.status !== "setup";
 
   // What THIS member fills out:
@@ -106,7 +170,7 @@ export async function getMemberTasks(code: string, memberId: string) {
     prompt: q.prompt,
     type: q.type,
     options: q.options,
-    answer: locked ? null : (answerByQ.get(q.id) ?? null),
+    answer: locked && !isOwner ? null : (answerByQ.get(q.id) ?? null),
   }));
 
   // Captain block: team branding + topics + who-on-the-team-has-filled-out.
@@ -183,6 +247,7 @@ export async function getMemberTasks(code: string, memberId: string) {
   return {
     groupName: ctx.group.name,
     locked,
+    isOwner,
     gameDate: ctx.group.scheduled_time ?? null,
     answerDeadline: ctx.group.answer_deadline ?? null,
     member: {

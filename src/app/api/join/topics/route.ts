@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { validateMember } from "@/lib/join";
+import { authorizeMember, currentUserId } from "@/lib/join";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { CATEGORY_OF_TOPIC } from "@/lib/trivia/topics";
 
@@ -9,8 +9,10 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false }, { status: 400 });
   }
 
-  const ctx = await validateMember(String(code), String(memberId));
-  if (!ctx) return NextResponse.json({ ok: false }, { status: 403 });
+  const userId = await currentUserId();
+  const access = await authorizeMember(String(code), String(memberId), userId);
+  if (!access.ok) return NextResponse.json({ ok: false, error: access.error }, { status: access.status });
+  const ctx = access;
   if (ctx.group.status !== "setup") {
     return NextResponse.json({ ok: false, error: "locked" }, { status: 423 });
   }

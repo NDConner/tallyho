@@ -1,13 +1,17 @@
 import { NextResponse } from "next/server";
-import { validateMember } from "@/lib/join";
+import { authorizeMember, currentUserId } from "@/lib/join";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 
 export async function POST(req: Request) {
   const { code, memberId, questionId, answer } = await req.json().catch(() => ({}));
   if (!code || !memberId || !questionId) return NextResponse.json({ ok: false }, { status: 400 });
 
-  const ctx = await validateMember(String(code), String(memberId));
-  if (!ctx) return NextResponse.json({ ok: false }, { status: 403 });
+  // Only the person who owns this slot (claimed + signed in) — or, for legacy
+  // groups, anyone on the code+name flow — may write its answers.
+  const userId = await currentUserId();
+  const access = await authorizeMember(String(code), String(memberId), userId);
+  if (!access.ok) return NextResponse.json({ ok: false, error: access.error }, { status: access.status });
+  const ctx = access;
   // Host has locked answers — nobody can submit or change anything.
   if (ctx.group.status !== "setup") {
     return NextResponse.json({ ok: false, error: "locked" }, { status: 423 });

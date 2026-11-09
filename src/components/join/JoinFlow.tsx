@@ -41,6 +41,7 @@ interface Captain {
 interface Tasks {
   groupName: string;
   locked: boolean;
+  isOwner: boolean;
   gameDate: string | null;
   answerDeadline: string | null;
   member: { id: string; name: string; isCaptain: boolean; teamId: string | null };
@@ -301,10 +302,11 @@ function TaskRouter({ code, tasks, onSwitchUser }: { code: string; tasks: Tasks;
   });
   const answeredCount = tasks.questions.reduce((n, q) => n + (answers[q.id]?.trim() ? 1 : 0), 0);
 
-  // Once the host locks, nobody reviews answers — not even their own. Members
-  // identify by picking a name (no login), so letting anyone open the review
-  // would let them read anyone else's answers. Show a plain locked screen.
-  if (tasks.locked) return <LockedScreen tasks={tasks} onSwitchUser={onSwitchUser} />;
+  // Once locked, nobody can change anything. A member on the legacy code+name
+  // flow (not a verified owner) also can't open the review — picking a name is no
+  // proof of identity, so it would let them read someone else's answers. A signed-
+  // in owner, though, is provably themselves, so they get a read-only review.
+  if (tasks.locked && !tasks.isOwner) return <LockedScreen tasks={tasks} onSwitchUser={onSwitchUser} />;
 
   if (view === "questions") {
     return (

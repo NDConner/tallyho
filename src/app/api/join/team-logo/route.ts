@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { validateMember } from "@/lib/join";
+import { authorizeMember, currentUserId } from "@/lib/join";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 
 export const runtime = "nodejs";
@@ -18,8 +18,10 @@ export async function POST(req: Request) {
   const remove = String(form.get("remove") || "") === "1";
   if (!code || !memberId || !teamId) return NextResponse.json({ ok: false }, { status: 400 });
 
-  const ctx = await validateMember(code, memberId);
-  if (!ctx) return NextResponse.json({ ok: false }, { status: 403 });
+  const userId = await currentUserId();
+  const access = await authorizeMember(code, memberId, userId);
+  if (!access.ok) return NextResponse.json({ ok: false, error: access.error }, { status: access.status });
+  const ctx = access;
   if (ctx.group.status !== "setup") {
     return NextResponse.json({ ok: false, error: "locked" }, { status: 423 });
   }
