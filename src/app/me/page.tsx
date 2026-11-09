@@ -4,6 +4,7 @@ import { Wordmark } from "@/components/Wordmark";
 import { CATEGORY_LABELS } from "@/lib/brand";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
+import { markNotificationsRead } from "./actions";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Your home — Tallyho" };
@@ -38,7 +39,7 @@ export default async function MePage() {
 
   const admin = createSupabaseAdminClient();
 
-  const [{ data: memberRows }, { data: hostedRows }] = await Promise.all([
+  const [{ data: memberRows }, { data: hostedRows }, { data: notifRows }] = await Promise.all([
     admin
       .from("members")
       .select("id, group_id, display_name, is_captain, team_id, claimed_at")
@@ -49,9 +50,24 @@ export default async function MePage() {
       .select("id, name, category, join_code, status, created_at")
       .eq("created_by", user.id)
       .order("created_at", { ascending: false }),
+    // Defensive: returns an error (handled as empty) if notifications isn't migrated yet.
+    admin
+      .from("notifications")
+      .select("id, type, title, body, link, group_id, read_at, created_at")
+      .eq("user_id", user.id)
+      .order("created_at", { ascending: false })
+      .limit(12),
   ]);
   const members = memberRows ?? [];
   const hosted = hostedRows ?? [];
+  const notifications = (notifRows ?? []) as {
+    id: string;
+    title: string;
+    body: string | null;
+    link: string | null;
+    read_at: string | null;
+  }[];
+  const unreadCount = notifications.filter((n) => !n.read_at).length;
   const groupIds = [...new Set(members.map((m) => m.group_id as string))];
 
   const [{ data: groups }, { data: teams }, { data: games }, { data: responses }] = await Promise.all([
@@ -122,6 +138,53 @@ export default async function MePage() {
 
       <h1 className="font-display text-3xl font-black">Your home</h1>
       <p className="mt-1 text-sm text-cream/55">Signed in as {user.email}.</p>
+
+      {/* notifications inbox */}
+      {notifications.length > 0 && (
+        <section className="card mt-6 p-5">
+          <div className="flex items-center justify-between gap-2">
+            <h2 className="font-display text-lg font-bold">
+              🔔 Notifications
+              {unreadCount > 0 && (
+                <span className="chip ml-2 cursor-default border-cyan/40 text-xs text-cyan">
+                  {unreadCount} new
+                </span>
+              )}
+            </h2>
+            {unreadCount > 0 && (
+              <form action={markNotificationsRead}>
+                <button className="text-xs text-cream/50 underline hover:text-cream">Mark all read</button>
+              </form>
+            )}
+          </div>
+          <ul className="mt-3 space-y-2">
+            {notifications.map((n) => (
+              <li
+                key={n.id}
+                className={
+                  "rounded-xl border px-3 py-2 " +
+                  (n.read_at ? "border-white/10 bg-white/5" : "border-cyan/30 bg-cyan/5")
+                }
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="text-sm font-semibold text-cream">
+                      {!n.read_at && "🟢 "}
+                      {n.title}
+                    </div>
+                    {n.body && <div className="mt-0.5 text-xs text-cream/60">{n.body}</div>}
+                  </div>
+                  {n.link && (
+                    <Link href={n.link} className="btn btn-ghost shrink-0 text-xs">
+                      Open →
+                    </Link>
+                  )}
+                </div>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
 
       {/* host a game */}
       <section className="card mt-6 flex flex-wrap items-center justify-between gap-4 border-magenta/30 bg-magenta/5 p-5">

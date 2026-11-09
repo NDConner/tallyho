@@ -188,6 +188,7 @@ export async function getMemberTasks(code: string, memberId: string, userId: str
     emoji: string | null;
     selected: { name: string; category: string }[];
     categories: ActiveCategory[];
+    triviaPicker: string; // "captains" | "host" — host hides the captain topic picker
     teammates: { id: string; name: string; isCaptain: boolean; status: "done" | "progress" | "notstarted" }[];
   } | null = null;
 
@@ -247,6 +248,8 @@ export async function getMemberTasks(code: string, memberId: string, userId: str
       emoji: (team as { emoji?: string | null })?.emoji ?? null,
       selected: (sel ?? []).map((s) => ({ name: s.name, category: s.category })),
       categories: activeCategories(ctx.group.trivia_categories),
+      triviaPicker:
+        (ctx.group as { trivia_picker?: string }).trivia_picker === "host" ? "host" : "captains",
       teammates,
     };
   }

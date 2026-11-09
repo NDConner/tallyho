@@ -105,13 +105,24 @@ async function createGameForGroup(
   groupId: string,
   questionsPerTeam: number,
 ): Promise<string | null> {
-  const [{ data: teamData }, { data: memberData }, { data: assignmentData }, { data: questionData }] =
-    await Promise.all([
-      supabase.from("teams").select("*").eq("group_id", groupId).order("team_index"),
-      supabase.from("members").select("*").eq("group_id", groupId).eq("is_playing", true).order("created_at"),
-      supabase.from("feud_question_assignments").select("member_id, question_id").eq("group_id", groupId),
-      supabase.from("feud_questions").select("id, type, target_member_id").eq("group_id", groupId),
-    ]);
+  const [
+    { data: teamData },
+    { data: memberData },
+    { data: assignmentData },
+    { data: questionData },
+    { data: groupData },
+  ] = await Promise.all([
+    supabase.from("teams").select("*").eq("group_id", groupId).order("team_index"),
+    supabase.from("members").select("*").eq("group_id", groupId).eq("is_playing", true).order("created_at"),
+    supabase.from("feud_question_assignments").select("member_id, question_id").eq("group_id", groupId),
+    supabase.from("feud_questions").select("id, type, target_member_id").eq("group_id", groupId),
+    // select("*") so new columns (feud_ratio, steals_enabled) are read without
+    // breaking before their migration runs; both default safely when absent.
+    supabase.from("groups").select("*").eq("id", groupId).maybeSingle(),
+  ]);
+  const g = (groupData ?? {}) as { feud_ratio?: number; steals_enabled?: boolean };
+  const feudRatio = Math.max(1, Math.min(100, Number(g.feud_ratio ?? 50) || 50));
+  const stealsEnabled = Boolean(g.steals_enabled);
   const teams = (teamData ?? []) as Team[];
   const members = (memberData ?? []) as Member[];
   const nameById = new Map(members.map((m) => [m.id, m.display_name]));
@@ -269,7 +280,7 @@ async function createGameForGroup(
       current_member_id: queue[0].memberId,
       current_phase: "feud",
       settings,
-      state: { queue, cursor: 0, questionsPerTeam: k },
+      state: { queue, cursor: 0, questionsPerTeam: k, feudRatio, stealsEnabled },
       started_at: new Date().toISOString(),
     })
     .select("id")
@@ -778,4 +789,31 @@ export async function revertTurn(input: { gameId: string; cursor: number; deltas
     .delete()
     .eq("game_id", input.gameId)
     .filter("payload->>cursor", "eq", String(input.cursor));
+}
+
+/**
+ * Steal: the active team missed, so the next team answered it correctly for a
+ * flat +1. Tagged with the turn's cursor so back-nav reversal (revertTurn)
+ * removes it like any other turn score.
+ */
+export async function recordSteal(input: {
+  gameId: string;
+  teamId: string;
+  cursor: number;
+  questionId?: string;
+}) {
+  const supabase = await createSupabaseServerClient();
+  await addPoints(supabase, input.gameId, input.teamId, 1);
+  await supabase.from("game_events").insert({
+    game_id: input.gameId,
+    type: "steal_result",
+    payload: {
+      teamId: input.teamId,
+      points: 1,
+      correct: true,
+      kind: "steal",
+      questionId: input.questionId ?? null,
+      cursor: input.cursor ?? null,
+    },
+  });
 }

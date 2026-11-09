@@ -38,6 +38,8 @@ export default async function PlayPage({ params }: { params: Promise<{ gameId: s
     triviaOnly?: boolean;
     winTarget?: number;
     triviaPool?: TriviaPoolItem[];
+    feudRatio?: number;
+    stealsEnabled?: boolean;
   };
   const queue = state.queue ?? [];
   const cursor = state.cursor ?? 0;
@@ -176,6 +178,8 @@ export default async function PlayPage({ params }: { params: Promise<{ gameId: s
     triviaOnly,
     winTarget: state.winTarget ?? null,
     turnNetSeed,
+    feudRatio: state.feudRatio ?? 50,
+    stealsEnabled: Boolean(state.stealsEnabled),
   };
 
   return <LiveGame {...payload} />;

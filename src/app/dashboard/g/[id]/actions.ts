@@ -3,6 +3,8 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { createSupabaseAdminClient } from "@/lib/supabase/admin";
+import { createNotification } from "@/lib/notify";
 import { ensureAllHoldouts } from "@/lib/holdouts";
 import { regenerateTriviaBank } from "@/lib/trivia/regenerate";
 import { STARTER_POOL, CATEGORY_OF_TOPIC } from "@/lib/trivia/topics";
@@ -381,6 +383,116 @@ export async function setFeudSubject(input: {
     .update({ feud_subject: { mode: "theme", theme, pool } })
     .eq("id", input.groupId);
   if (error) return { ok: false, error: error.message };
+  revalidatePath(`/dashboard/g/${input.groupId}`);
+  return { ok: true };
+}
+
+// ─── Game format (feud/trivia mix + steals) ──────────────────────────────────
+
+/** Host sets the live game's format: the feud↔trivia blend (feud_ratio %, where
+ *  100 = feud only), who picks trivia topics, and whether a missed question can
+ *  be stolen by the next team for +1. */
+export async function setGameFormat(input: {
+  groupId: string;
+  feudRatio: number;
+  triviaPicker: "captains" | "host";
+  stealsEnabled: boolean;
+}): Promise<{ ok: boolean; error?: string }> {
+  if (!input.groupId) return { ok: false, error: "Missing group." };
+  const supabase = await createSupabaseServerClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return { ok: false, error: "Sign in first." };
+  const feudRatio = Math.max(1, Math.min(100, Math.round(input.feudRatio || 50)));
+  const triviaPicker = input.triviaPicker === "host" ? "host" : "captains";
+  const { error } = await supabase
+    .from("groups")
+    .update({
+      feud_ratio: feudRatio,
+      trivia_picker: triviaPicker,
+      steals_enabled: Boolean(input.stealsEnabled),
+    })
+    .eq("id", input.groupId);
+  if (error) return { ok: false, error: error.message };
+  revalidatePath(`/dashboard/g/${input.groupId}`);
+  return { ok: true };
+}
+
+// ─── Returning players + notifications ───────────────────────────────────────
+
+/**
+ * Add a returning player by their existing account: links the new roster slot to
+ * their user id (so the game shows up on their home) and drops them a
+ * notification. `name` is the in-group name to show (defaults to the one they
+ * last used). The host can rename or move them on the roster afterward.
+ */
+export async function addKnownPlayer(input: {
+  groupId: string;
+  userId: string;
+  name?: string;
+  teamId?: string | null;
+}): Promise<{ ok: boolean; error?: string }> {
+  if (!input.groupId || !input.userId) return { ok: false, error: "Missing info." };
+  const supabase = await createSupabaseServerClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return { ok: false, error: "Sign in first." };
+
+  const { data: grp } = await supabase
+    .from("groups")
+    .select("id, name, join_code, created_by")
+    .eq("id", input.groupId)
+    .maybeSingle();
+  if (!grp || grp.created_by !== user.id) return { ok: false, error: "Not your group." };
+
+  // Already on this roster?
+  const { data: existing } = await supabase
+    .from("members")
+    .select("id")
+    .eq("group_id", input.groupId)
+    .eq("user_id", input.userId)
+    .maybeSingle();
+  if (existing) return { ok: false, error: "They're already in this game." };
+
+  // Team: the one given, or the smallest (keep teams balanced).
+  let teamId = input.teamId ?? null;
+  if (!teamId) {
+    const [{ data: members }, { data: teams }] = await Promise.all([
+      supabase.from("members").select("team_id").eq("group_id", input.groupId).eq("is_playing", true),
+      supabase.from("teams").select("id").eq("group_id", input.groupId).order("team_index"),
+    ]);
+    if (teams && teams.length) {
+      const counts = new Map<string, number>(teams.map((t) => [t.id as string, 0]));
+      for (const m of members ?? [])
+        if (m.team_id && counts.has(m.team_id)) counts.set(m.team_id, counts.get(m.team_id)! + 1);
+      teamId = [...counts.entries()].sort((a, b) => a[1] - b[1])[0][0];
+    }
+  }
+
+  const name = (input.name ?? "").trim().slice(0, 40) || "Player";
+  const { error } = await supabase.from("members").insert({
+    group_id: input.groupId,
+    display_name: name,
+    team_id: teamId,
+    is_captain: false,
+    user_id: input.userId,
+    claimed_at: new Date().toISOString(),
+  });
+  if (error) return { ok: false, error: error.message };
+
+  // Ping them (best-effort — no-ops if notifications aren't migrated yet).
+  const admin = createSupabaseAdminClient();
+  await createNotification(admin, {
+    userId: input.userId,
+    type: "added_to_game",
+    title: `You're in “${grp.name}”`,
+    body: `${user.email ?? "Your host"} added you to a game of Tallyho as ${name}. Tap to see your questions.`,
+    link: `/join?code=${grp.join_code}`,
+    groupId: input.groupId,
+  });
+
   revalidatePath(`/dashboard/g/${input.groupId}`);
   return { ok: true };
 }

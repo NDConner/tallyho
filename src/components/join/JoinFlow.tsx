@@ -36,6 +36,7 @@ interface Captain {
   emoji: string | null;
   selected: { name: string; category: string }[];
   categories: ActiveCategory[];
+  triviaPicker: string; // "captains" | "host"
   teammates: Teammate[];
 }
 interface Tasks {
@@ -467,18 +468,24 @@ function CaptainHub({
         </div>
       </div>
 
-      {/* 2) Topics */}
+      {/* 2) Topics (hidden when the host picks topics for everyone) */}
       <div className="mt-3 rounded-xl border border-white/10 bg-ink/40 p-3">
         <div className="label mb-2">2 · Trivia topics</div>
-        <CaptainTopics
-          code={code}
-          memberId={tasks.member.id}
-          teamId={cap.teamId}
-          categories={cap.categories}
-          selected={selected}
-          onSaved={setSelected}
-          locked={locked}
-        />
+        {cap.triviaPicker === "host" ? (
+          <p className="text-sm text-cream/55">
+            🎛️ Your host is choosing the trivia topics for every team — nothing to pick here.
+          </p>
+        ) : (
+          <CaptainTopics
+            code={code}
+            memberId={tasks.member.id}
+            teamId={cap.teamId}
+            categories={cap.categories}
+            selected={selected}
+            onSaved={setSelected}
+            locked={locked}
+          />
+        )}
       </div>
 
       {/* 3) Team fill-out status */}

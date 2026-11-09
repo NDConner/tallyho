@@ -25,8 +25,11 @@ import {
 import { startTriviaOnlyGame } from "@/app/play/actions";
 import { DuplicateDialog } from "@/components/DuplicateDialog";
 import { FeudSubjectEditor } from "@/components/FeudSubjectEditor";
+import { GameFormatEditor } from "@/components/GameFormatEditor";
+import { KnownPlayerAdder } from "@/components/KnownPlayerAdder";
 import { isAnswersLocked, lockReason } from "@/lib/lock";
 import { normalizeFeudSubject } from "@/lib/feud/subjects";
+import { getKnownPlayers } from "@/lib/known-players";
 import type { Group, Member, Team } from "@/lib/types";
 
 function appUrl(): string {
@@ -128,6 +131,15 @@ export default async function GroupPage({
   }
   const requireLogin = Boolean((group as unknown as { require_member_login?: boolean }).require_member_login);
 
+  // Returning players: accounts that have claimed a slot in this host's games and
+  // aren't already on this roster — re-addable in one tap (links + notifies them).
+  const rosterUserIds = new Set(
+    members
+      .map((m) => (m as unknown as { user_id?: string | null }).user_id)
+      .filter((u): u is string => Boolean(u)),
+  );
+  const knownPlayers = (await getKnownPlayers(user.id)).filter((kp) => !rosterUserIds.has(kp.userId));
+
   // In-progress game to resume. Pick the most-PROGRESSED unfinished game, not
   // merely the newest — an accidental "start a new game" click can leave an empty
   // newer row that would otherwise shadow the real game and strand the host.
@@ -168,6 +180,12 @@ export default async function GroupPage({
   const lockWhy = lockReason(group);
   const deadlinePretty = prettyDeadline(deadlineIso);
   const feudSubject = normalizeFeudSubject((group as unknown as { feud_subject?: unknown }).feud_subject);
+  const gFmt = group as unknown as { feud_ratio?: number; trivia_picker?: string; steals_enabled?: boolean };
+  const gameFormat = {
+    feudRatio: Math.max(1, Math.min(100, Number(gFmt.feud_ratio ?? 50) || 50)),
+    triviaPicker: (gFmt.trivia_picker === "host" ? "host" : "captains") as "captains" | "host",
+    stealsEnabled: Boolean(gFmt.steals_enabled),
+  };
 
   // Per-member fill-out progress. What a member owes depends on type:
   //   consensus — all of them except their one holdout
@@ -538,6 +556,18 @@ export default async function GroupPage({
             </div>
           </section>
 
+          {/* game format: feud/trivia blend, who picks trivia topics, steals */}
+          <section className="card p-5">
+            <h2 className="font-display text-lg font-bold">🎛️ Game format</h2>
+            <p className="mt-1 text-sm text-cream/55">
+              Set the feud-to-trivia blend, who picks trivia topics, and whether missed questions can
+              be stolen. This applies when you start the main live game.
+            </p>
+            <div className="mt-3">
+              <GameFormatEditor groupId={group.id} initial={gameFormat} />
+            </div>
+          </section>
+
           {/* path to game night */}
           <section className="card p-5">
             <h2 className="font-display text-lg font-bold">Path to game night</h2>
@@ -753,6 +783,18 @@ export default async function GroupPage({
               </button>
             </form>
 
+            {/* add a returning player by their account (links + notifies them) */}
+            <div className="mt-6 border-t border-white/10 pt-4">
+              <h3 className="font-display text-sm font-bold">Add someone who&apos;s played before</h3>
+              <p className="mt-0.5 text-xs text-cream/45">
+                Returning players who&apos;ve signed in and claimed a name in your games. Adding links
+                this game to their account — it shows on their home and they get a notification.
+              </p>
+              <div className="mt-3">
+                <KnownPlayerAdder groupId={group.id} players={knownPlayers} />
+              </div>
+            </div>
+
             {/* answer-only names (not playing, but pickable) */}
             <div className="mt-6 border-t border-white/10 pt-4">
               <h3 className="font-display text-sm font-bold">Answer-only names</h3>
@@ -808,7 +850,8 @@ export default async function GroupPage({
               <>
                 <p className="mt-1 text-sm text-cream/55">
                   Mirror your screen to the TV and run it from here. Pick how long you want it — each
-                  team plays the same number of questions, and trivia matches feud 1:1.
+                  team plays the same number of feud turns, and trivia follows the blend you set in
+                  Game format above.
                 </p>
                 {resumable && (
                   <p className="mt-3 rounded-lg border border-gold/30 bg-gold/5 px-3 py-2 text-xs text-gold">

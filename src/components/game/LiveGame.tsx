@@ -18,6 +18,7 @@ import {
   setWinTarget,
   adjustScore,
   revertTurn,
+  recordSteal,
   startNextRound,
   startTriviaOnlyGame,
   type GameTurn,
@@ -66,6 +67,20 @@ export interface LiveGamePayload {
   triviaOnly?: boolean; // skip the survey entirely — trivia rounds only
   winTarget?: number | null; // trivia-only: score to play to (default behaviour when null)
   turnNetSeed?: Record<number, Record<string, number>>; // points each past turn awarded (for back-nav reversal)
+  feudRatio?: number; // % of the game that's feud vs trivia (100 = feud only); governs which turns get a trivia question
+  stealsEnabled?: boolean; // a missed question can be stolen by the next team for +1
+}
+
+/** Which turn cursors get a trivia question, given the feud:trivia split.
+ *  ratio 50 → every turn (1:1); 100 → none (feud only); 75 → ~every 3rd, etc.
+ *  Trivia slots are spread evenly across the game. */
+function computeTriviaCursors(total: number, feudRatio: number): Set<number> {
+  if (total <= 0 || feudRatio >= 100) return new Set();
+  const want = Math.min(total, Math.max(0, Math.round((total * (100 - feudRatio)) / feudRatio)));
+  if (want >= total) return new Set(Array.from({ length: total }, (_, i) => i));
+  const out = new Set<number>();
+  for (let i = 1; i <= want; i++) out.add(Math.min(total - 1, Math.round((i * total) / (want + 1))));
+  return out;
 }
 
 type Phase = "preGame" | "intro" | "feud" | "feudReveal" | "triviaIntro" | "trivia" | "triviaReveal" | "over";
@@ -124,6 +139,14 @@ export function LiveGame(p: LiveGamePayload) {
     }
   }
 
+  // Steal mode: resolved steals per cursor ("won" = next team took +1, "skip" = none).
+  const [steals, setSteals] = useState<Record<number, "won" | "skip">>({});
+  // Which turns carry a trivia question, from the feud:trivia split (computed once).
+  const triviaCursorsRef = useRef<Set<number> | null>(null);
+  if (triviaCursorsRef.current === null)
+    triviaCursorsRef.current = computeTriviaCursors(p.queue.length, p.feudRatio ?? 50);
+  const turnHasTrivia = (c: number) => (p.triviaOnly ? true : triviaCursorsRef.current!.has(c));
+
   const addTurnNet = (c: number, teamId: string, pts: number) => {
     if (!pts) return;
     const m = (turnNetRef.current[c] ??= {});
@@ -140,6 +163,11 @@ export function LiveGame(p: LiveGamePayload) {
     });
     delete turnNetRef.current[c];
     completedRef.current.delete(c);
+    setSteals((s) => {
+      const n = { ...s };
+      delete n[c];
+      return n;
+    });
     await revertTurn({ gameId: p.gameId, cursor: c, deltas: net });
   }
   // Jump to any turn (back to fix an accidental entry, or forward to a played one).
@@ -266,6 +294,28 @@ export function LiveGame(p: LiveGamePayload) {
     setAnswer("");
     setTriviaRes(null);
     setPhase("triviaIntro");
+  }
+
+  // After a feud/guess reveal: play this turn's trivia if it has one (per the
+  // feud:trivia split), otherwise move straight on (e.g. a feud-only game).
+  function afterSurvey() {
+    if (turnHasTrivia(cursor)) continueToTrivia();
+    else nextTurn();
+  }
+
+  // Steal: the active team missed; the next team (rotates with the active team)
+  // can take it for a flat +1.
+  async function resolveSteal(won: boolean, stealTeamId: string) {
+    setSteals((s) => ({ ...s, [cursor]: won ? "won" : "skip" }));
+    if (!won) return;
+    setScores((s) => ({ ...s, [stealTeamId]: (s[stealTeamId] ?? 0) + 1 }));
+    addTurnNet(cursor, stealTeamId, 1);
+    await recordSteal({
+      gameId: p.gameId,
+      teamId: stealTeamId,
+      cursor,
+      questionId: turn?.feudQuestionId || currentTrivia?.id || undefined,
+    });
   }
 
   function startTrivia() {
@@ -414,6 +464,21 @@ export function LiveGame(p: LiveGamePayload) {
     await adjustScore({ gameId: p.gameId, teamId: turn.teamId, delta });
   }
 
+  // Steal availability for the current reveal: the next team (rotates with the
+  // active team) can take a missed question for +1.
+  const stealPos = turn ? p.teams.findIndex((t) => t.id === turn.teamId) : -1;
+  const stealTeam =
+    p.stealsEnabled && stealPos >= 0 && p.teams.length > 1
+      ? p.teams[(stealPos + 1) % p.teams.length]
+      : null;
+  const activeMissed =
+    (phase === "feudReveal" && turn?.kind === "feud" && feudRes != null && feudRes.points === 0) ||
+    (phase === "feudReveal" && turn != null && turn.kind !== "feud" && guessRes != null && guessRes.points === 0) ||
+    (phase === "triviaReveal" && triviaRes != null && triviaRes.points === 0);
+  const stealResult = steals[cursor];
+  const stealOffered = Boolean(stealTeam && activeMissed && stealResult === undefined);
+  const hasTrivia = !p.triviaOnly && (triviaCursorsRef.current?.size ?? 0) > 0;
+
   // --- render --------------------------------------------------------------
   return (
     <div className="mx-auto flex min-h-screen max-w-4xl flex-col px-4 py-4">
@@ -465,6 +530,35 @@ export function LiveGame(p: LiveGamePayload) {
         />
       )}
 
+      {/* STEAL: active team missed — the next team can take it for +1 */}
+      {stealOffered && stealTeam && (
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-cyan/40 bg-cyan/10 px-3 py-2 text-sm">
+          <span className="min-w-0">
+            🪝 Missed! <span className="font-semibold text-cream">{stealTeam.name}</span> can steal for{" "}
+            <span className="font-semibold">+1</span> — did they get it?
+          </span>
+          <span className="flex shrink-0 gap-2">
+            <button
+              onClick={() => resolveSteal(true, stealTeam.id)}
+              className="btn btn-primary px-3 py-1 text-xs"
+            >
+              ✓ Steal +1
+            </button>
+            <button
+              onClick={() => resolveSteal(false, stealTeam.id)}
+              className="btn btn-ghost px-3 py-1 text-xs"
+            >
+              ✗ No steal
+            </button>
+          </span>
+        </div>
+      )}
+      {stealResult === "won" && stealTeam && (phase === "feudReveal" || phase === "triviaReveal") && (
+        <div className="mt-3 rounded-xl border border-green/40 bg-green/10 px-3 py-2 text-sm text-green">
+          🪝 {stealTeam.name} stole it — +1!
+        </div>
+      )}
+
       <div className="relative flex flex-1 items-center justify-center py-6">
         {paused && phase !== "over" && (
           <div className="absolute inset-0 z-10 flex items-center justify-center rounded-3xl bg-ink/80 backdrop-blur-sm">
@@ -503,32 +597,40 @@ export function LiveGame(p: LiveGamePayload) {
           </div>
         )}
 
-        {/* PRE-GAME: show each team's trivia topics */}
+        {/* PRE-GAME: show each team's trivia topics (or a feud-only splash) */}
         {phase === "preGame" && !p.triviaOnly && (
           <div className="w-full max-w-2xl text-center">
-            <div className="text-5xl">📋</div>
-            <h2 className="mt-3 font-display text-4xl font-black">Tonight&apos;s trivia</h2>
-            <p className="mt-1 text-cream/60">What each team drew. (Feud questions stay a surprise!)</p>
-            <div className="mt-6 grid gap-3 sm:grid-cols-2">
-              {p.teams.map((t) => (
-                <div key={t.id} className="card p-4 text-left">
-                  <div className="flex items-center gap-2">
-                    <TeamBadge team={t} className="h-7 w-7 text-lg" />
-                    <span className="font-display font-bold">{t.name}</span>
+            <div className="text-5xl">{hasTrivia ? "📋" : "🎤"}</div>
+            <h2 className="mt-3 font-display text-4xl font-black">
+              {hasTrivia ? "Tonight's trivia" : "Feud night"}
+            </h2>
+            <p className="mt-1 text-cream/60">
+              {hasTrivia
+                ? "What each team drew. (Feud questions stay a surprise!)"
+                : "All feud, no trivia tonight — guess what your crew said."}
+            </p>
+            {hasTrivia && (
+              <div className="mt-6 grid gap-3 sm:grid-cols-2">
+                {p.teams.map((t) => (
+                  <div key={t.id} className="card p-4 text-left">
+                    <div className="flex items-center gap-2">
+                      <TeamBadge team={t} className="h-7 w-7 text-lg" />
+                      <span className="font-display font-bold">{t.name}</span>
+                    </div>
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      {(p.topicsByTeam[t.id] ?? []).map((topic) => (
+                        <span key={topic} className="chip cursor-default text-xs">
+                          {topic}
+                        </span>
+                      ))}
+                      {(p.topicsByTeam[t.id] ?? []).length === 0 && (
+                        <span className="text-xs text-cream/40">No topics yet</span>
+                      )}
+                    </div>
                   </div>
-                  <div className="mt-2 flex flex-wrap gap-1.5">
-                    {(p.topicsByTeam[t.id] ?? []).map((topic) => (
-                      <span key={topic} className="chip cursor-default text-xs">
-                        {topic}
-                      </span>
-                    ))}
-                    {(p.topicsByTeam[t.id] ?? []).length === 0 && (
-                      <span className="text-xs text-cream/40">No topics yet</span>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            )}
             <button onClick={() => setPhase("intro")} className="btn btn-primary mt-8 text-lg">
               Start the game →
             </button>
@@ -641,7 +743,8 @@ export function LiveGame(p: LiveGamePayload) {
             pending={pending}
             onOverride={overrideFeud}
             onUndo={undoFeud}
-            onContinue={continueToTrivia}
+            onContinue={afterSurvey}
+            continueLabel={turnHasTrivia(cursor) ? "On to trivia →" : "Next →"}
           />
         )}
         {phase === "feudReveal" && turn && turn.kind !== "feud" && (
@@ -652,7 +755,8 @@ export function LiveGame(p: LiveGamePayload) {
             base={guessBase}
             pending={pending}
             onOverride={overrideGuess}
-            onContinue={continueToTrivia}
+            onContinue={afterSurvey}
+            continueLabel={turnHasTrivia(cursor) ? "On to trivia →" : "Next →"}
           />
         )}
 
@@ -924,6 +1028,7 @@ function FeudRevealPanel({
   onOverride,
   onUndo,
   onContinue,
+  continueLabel,
 }: {
   groupName: string;
   guess: string;
@@ -934,6 +1039,7 @@ function FeudRevealPanel({
   onOverride: (label: string, awardPoints: number) => void;
   onUndo: () => void;
   onContinue: () => void;
+  continueLabel: string;
 }) {
   if (!result) {
     return (
@@ -1032,7 +1138,7 @@ function FeudRevealPanel({
         </p>
       </div>
       <button onClick={onContinue} disabled={pending} className="btn btn-secondary mt-6 text-lg">
-        On to trivia →
+        {continueLabel}
       </button>
     </div>
   );
@@ -1046,6 +1152,7 @@ function GuessRevealPanel({
   pending,
   onOverride,
   onContinue,
+  continueLabel,
 }: {
   kind: string;
   guess: string;
@@ -1054,6 +1161,7 @@ function GuessRevealPanel({
   pending: boolean;
   onOverride: (correct: boolean) => void;
   onContinue: () => void;
+  continueLabel: string;
 }) {
   if (!result) {
     return (
@@ -1094,7 +1202,7 @@ function GuessRevealPanel({
       </button>
       <div className="mt-5">
         <button onClick={onContinue} disabled={pending} className="btn btn-secondary text-lg">
-          On to trivia →
+          {continueLabel}
         </button>
       </div>
     </div>
