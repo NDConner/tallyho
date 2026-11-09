@@ -208,9 +208,14 @@ export function JoinFlow({ initialCode }: { initialCode?: string }) {
             {authEmail && (
               <div className="flex items-center justify-between gap-2 rounded-xl border border-green/30 bg-green/5 px-3 py-2 text-xs">
                 <span className="min-w-0 truncate text-green">✓ Signed in as {authEmail}</span>
-                <button onClick={signOut} className="shrink-0 text-cream/50 underline hover:text-cream">
-                  Sign out
-                </button>
+                <div className="flex shrink-0 items-center gap-3">
+                  <a href="/me" className="text-cyan underline hover:text-cream">
+                    Your games
+                  </a>
+                  <button onClick={signOut} className="text-cream/50 underline hover:text-cream">
+                    Sign out
+                  </button>
+                </div>
               </div>
             )}
 

@@ -52,6 +52,7 @@ export async function createGroup(input: CreateGroupInput): Promise<CreateGroupR
         team_assignment: input.teamAssignment,
         join_code,
         status: "setup",
+        require_member_login: true, // new groups are secure by default; host can toggle off
       })
       .select("id")
       .single();

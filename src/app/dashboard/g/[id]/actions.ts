@@ -290,6 +290,41 @@ export async function setSchedule(input: { groupId: string; gameDate: string; an
   revalidatePath(`/dashboard/g/${input.groupId}`);
 }
 
+// ─── Member accounts ─────────────────────────────────────────────────────────
+
+/** Require members to sign in + claim their name before answering (per group). */
+export async function setRequireMemberLogin(formData: FormData) {
+  const groupId = String(formData.get("groupId") || "");
+  const value = String(formData.get("value") || "") === "1";
+  if (!groupId) return;
+  const supabase = await createSupabaseServerClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return;
+  await supabase.from("groups").update({ require_member_login: value }).eq("id", groupId);
+  revalidatePath(`/dashboard/g/${groupId}`);
+}
+
+/** Free a claimed roster slot (someone grabbed the wrong name) so the right
+ *  account can claim it. */
+export async function unclaimMember(formData: FormData) {
+  const groupId = String(formData.get("groupId") || "");
+  const memberId = String(formData.get("memberId") || "");
+  if (!groupId || !memberId) return;
+  const supabase = await createSupabaseServerClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return;
+  await supabase
+    .from("members")
+    .update({ user_id: null, claimed_at: null })
+    .eq("id", memberId)
+    .eq("group_id", groupId);
+  revalidatePath(`/dashboard/g/${groupId}`);
+}
+
 // ─── Trivia categories + topics + bank editing ───────────────────────────────
 
 /** Set which categories captains pick trivia topics within (built-in + custom,

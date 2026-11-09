@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { CATEGORY_LABELS } from "@/lib/brand";
 import { memberInvite, captainInvite, joinLink } from "@/lib/invites";
 import { InviteCard } from "@/components/InviteCard";
@@ -9,7 +10,16 @@ import { RosterEditor } from "@/components/RosterEditor";
 import { GroupAdmin } from "@/components/GroupAdmin";
 import { GameLengthControl } from "@/components/GameLengthControl";
 import { GameSchedule } from "@/components/GameSchedule";
-import { addMember, generateTriviaBank, reshuffleTeams, addGuest, removeMember, setAnswerLock } from "./actions";
+import {
+  addMember,
+  generateTriviaBank,
+  reshuffleTeams,
+  addGuest,
+  removeMember,
+  setAnswerLock,
+  setRequireMemberLogin,
+  unclaimMember,
+} from "./actions";
 import { startTriviaOnlyGame } from "@/app/play/actions";
 import type { Group, Member, Team } from "@/lib/types";
 
@@ -65,6 +75,26 @@ export default async function GroupPage({
   // Players take turns & fill out; "answer-only" guests are just pickable names.
   const players = members.filter((m) => m.is_playing !== false);
   const guests = members.filter((m) => m.is_playing === false);
+
+  // Member-account claim status: look up the email behind each claimed slot.
+  const claimedUserIds = [
+    ...new Set(
+      members
+        .map((m) => (m as unknown as { user_id?: string | null }).user_id)
+        .filter((u): u is string => Boolean(u)),
+    ),
+  ];
+  const emailByUserId = new Map<string, string>();
+  if (claimedUserIds.length) {
+    const admin = createSupabaseAdminClient();
+    await Promise.all(
+      claimedUserIds.map(async (uid) => {
+        const { data } = await admin.auth.admin.getUserById(uid);
+        if (data?.user?.email) emailByUserId.set(uid, data.user.email);
+      }),
+    );
+  }
+  const requireLogin = Boolean((group as unknown as { require_member_login?: boolean }).require_member_login);
 
   // In-progress game to resume. Pick the most-PROGRESSED unfinished game, not
   // merely the newest — an accidental "start a new game" click can leave an empty
@@ -289,6 +319,72 @@ export default async function GroupPage({
                 </form>
               )}
             </div>
+          </section>
+
+          {/* member sign-in requirement + claim status */}
+          <section className={"card p-5 " + (requireLogin ? "border-cyan/30 bg-cyan/5" : "")}>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="min-w-0">
+                <h2 className="font-display text-lg font-bold">
+                  {requireLogin ? "🔒 Members sign in to play" : "🔓 Open join (no sign-in)"}
+                </h2>
+                <p className="mt-1 text-sm text-cream/60">
+                  {requireLogin
+                    ? "Everyone signs in and claims their name, so only they can see or change their answers — no one can open someone else's."
+                    : "Anyone with the code can pick a name (the quick, classic flow). Turn on sign-in to lock each person's answers to their own account."}
+                </p>
+              </div>
+              <form action={setRequireMemberLogin}>
+                <input type="hidden" name="groupId" value={group.id} />
+                <input type="hidden" name="value" value={requireLogin ? "0" : "1"} />
+                <button
+                  type="submit"
+                  className={"btn whitespace-nowrap text-sm " + (requireLogin ? "btn-ghost" : "btn-primary")}
+                >
+                  {requireLogin ? "Allow open join" : "🔒 Require sign-in"}
+                </button>
+              </form>
+            </div>
+            {(requireLogin || claimedUserIds.length > 0) && players.length > 0 && (
+              <div className="mt-4 border-t border-white/10 pt-3">
+                <h3 className="font-display text-sm font-bold">Who&apos;s claimed their name</h3>
+                <ul className="mt-2 grid gap-1.5 sm:grid-cols-2">
+                  {players.map((m) => {
+                    const uid = (m as unknown as { user_id?: string | null }).user_id ?? null;
+                    return (
+                      <li
+                        key={m.id}
+                        className="flex items-center justify-between gap-2 rounded-lg bg-white/5 px-3 py-2 text-sm"
+                      >
+                        <span className="min-w-0 truncate">
+                          {m.display_name}
+                          {m.is_captain && " 🎖️"}
+                        </span>
+                        {uid ? (
+                          <span className="flex min-w-0 shrink-0 items-center gap-1.5">
+                            <span className="max-w-[9rem] truncate text-xs text-green" title={emailByUserId.get(uid)}>
+                              ✓ {emailByUserId.get(uid) ?? "claimed"}
+                            </span>
+                            <form action={unclaimMember}>
+                              <input type="hidden" name="groupId" value={group.id} />
+                              <input type="hidden" name="memberId" value={m.id} />
+                              <button
+                                type="submit"
+                                className="text-xs text-cream/40 underline hover:text-magenta"
+                              >
+                                unclaim
+                              </button>
+                            </form>
+                          </span>
+                        ) : (
+                          <span className="shrink-0 text-xs text-cream/35">— not yet</span>
+                        )}
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+            )}
           </section>
 
           {/* path to game night */}
