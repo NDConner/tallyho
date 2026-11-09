@@ -131,6 +131,13 @@ export default async function GroupPage({
   }
   const requireLogin = Boolean((group as unknown as { require_member_login?: boolean }).require_member_login);
 
+  // memberId → the email behind its claimed account, for the roster editor.
+  const linkedEmail: Record<string, string> = {};
+  for (const m of players) {
+    const uid = (m as unknown as { user_id?: string | null }).user_id;
+    if (uid) linkedEmail[m.id] = emailByUserId.get(uid) ?? "linked";
+  }
+
   // Returning players: accounts that have claimed a slot in this host's games and
   // aren't already on this roster — re-addable in one tap (links + notifies them).
   const rosterUserIds = new Set(
@@ -752,7 +759,7 @@ export default async function GroupPage({
               Move a player with the dropdown, tap ★ to make someone captain, ✏️ to rename a team, or
               reshuffle to redraw teams and captains at random.
             </p>
-            <RosterEditor groupId={group.id} members={players} teams={teams} />
+            <RosterEditor groupId={group.id} members={players} teams={teams} linkedEmail={linkedEmail} />
 
             {/* add member */}
             <form action={addMember} className="mt-4 flex flex-wrap items-end gap-2">
@@ -843,59 +850,62 @@ export default async function GroupPage({
             </div>
           </section>
 
-          {/* host */}
+          {/* host the live game — trivia-only or feud+trivia, per the Game format */}
           <section className="card p-5">
             <h2 className="font-display text-lg font-bold">Host the live game</h2>
-            {hostReady ? (
+            {resumable && (
+              <p className="mt-3 rounded-lg border border-gold/30 bg-gold/5 px-3 py-2 text-xs text-gold">
+                ⚠ A game is already in progress — use <span className="font-semibold">Resume game</span> at
+                the top to continue it. Starting here begins a brand-new game with a 0–0 scoreboard.
+              </p>
+            )}
+            {gameFormat.feudRatio === 0 ? (
+              // Trivia-only night: no survey or bank needed — random trivia to a target.
+              teams.length > 0 && players.length > 0 ? (
+                <>
+                  <p className="mt-1 text-sm text-cream/55">
+                    Your format is <span className="font-semibold text-cream">trivia only</span> —
+                    completely random trivia, teams go back and forth, {2} points a question, first to
+                    your target wins. Raise the bar mid-game to keep rolling.
+                  </p>
+                  <form action={startTriviaOnlyGame} className="mt-3 flex flex-wrap items-center gap-2">
+                    <input type="hidden" name="groupId" value={group.id} />
+                    <label className="text-sm text-cream/60" htmlFor="winTarget">
+                      First to
+                    </label>
+                    <select id="winTarget" name="winTarget" defaultValue="30" className="input w-auto">
+                      <option value="20">20 points</option>
+                      <option value="30">30 points</option>
+                      <option value="40">40 points</option>
+                      <option value="50">50 points</option>
+                    </select>
+                    <button type="submit" className="btn btn-primary text-sm">
+                      ▶ Start trivia game
+                    </button>
+                  </form>
+                </>
+              ) : (
+                <p className="mt-1 text-sm text-cream/55">
+                  Add players and teams first, then start your trivia game.
+                </p>
+              )
+            ) : hostReady ? (
               <>
                 <p className="mt-1 text-sm text-cream/55">
                   Mirror your screen to the TV and run it from here. Pick how long you want it — each
                   team plays the same number of feud turns, and trivia follows the blend you set in
                   Game format above.
                 </p>
-                {resumable && (
-                  <p className="mt-3 rounded-lg border border-gold/30 bg-gold/5 px-3 py-2 text-xs text-gold">
-                    ⚠ A game is already in progress — use <span className="font-semibold">Resume game</span> at
-                    the top to continue it. Starting here begins a brand-new game with fresh questions and a
-                    0–0 scoreboard.
-                  </p>
-                )}
                 <GameLengthControl groupId={group.id} capacity={capacity} numTeams={teams.length} />
               </>
             ) : (
               <p className="mt-1 text-sm text-cream/55">
                 Finish setup first — you need filled-out feud questions and a trivia bank. (Tip: the
-                demo group comes fully loaded and is ready to host immediately.)
+                demo group comes fully loaded and is ready to host immediately. Or switch your Game
+                format to <span className="font-semibold">Trivia only</span> to skip setup entirely.)
               </p>
             )}
           </section>
-
-          {/* trivia-only quick game — no survey, no setup, play to a target */}
-          {teams.length > 0 && players.length > 0 && (
-            <section className="card border-cyan/30 bg-cyan/5 p-5">
-              <h2 className="font-display text-lg font-bold">🎲 Trivia-only game</h2>
-              <p className="mt-1 text-sm text-cream/55">
-                No survey, no setup — completely random trivia, teams go back and forth, {2} points a
-                question, first to your target wins. Start fresh games all night, or raise the bar mid-game
-                to keep going.
-              </p>
-              <form action={startTriviaOnlyGame} className="mt-3 flex flex-wrap items-center gap-2">
-                <input type="hidden" name="groupId" value={group.id} />
-                <label className="text-sm text-cream/60" htmlFor="winTarget">
-                  First to
-                </label>
-                <select id="winTarget" name="winTarget" defaultValue="30" className="input w-auto">
-                  <option value="20">20 points</option>
-                  <option value="30">30 points</option>
-                  <option value="40">40 points</option>
-                  <option value="50">50 points</option>
-                </select>
-                <button type="submit" className="btn btn-primary text-sm">
-                  ▶ Start trivia game
-                </button>
-              </form>
-            </section>
-          )}
 
           {/* wrap up a game that's underway (fixes a game stuck on "live") */}
           {group.status === "live" && (

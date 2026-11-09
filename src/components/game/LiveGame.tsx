@@ -184,7 +184,7 @@ export function LiveGame(p: LiveGamePayload) {
     setCurrentTrivia(null);
     setCursor(target);
     setPhase(target === 0 ? "preGame" : "intro");
-    await persistTurn({ gameId: p.gameId, cursor: target });
+    void persistTurn({ gameId: p.gameId, cursor: target }); // background; UI already moved
   }
 
   const turn = p.queue[cursor];
@@ -374,9 +374,9 @@ export function LiveGame(p: LiveGamePayload) {
   }
 
   // Trivia-only: end now (crown the leader), or raise the target and play on.
-  async function endGameNow() {
-    await persistTurn({ gameId: p.gameId, cursor, finished: true });
+  function endGameNow() {
     setPhase("over");
+    void persistTurn({ gameId: p.gameId, cursor, finished: true });
   }
   async function keepPlaying() {
     const next = (winTarget || 0) + 10;
@@ -385,16 +385,17 @@ export function LiveGame(p: LiveGamePayload) {
     await nextTurn();
   }
 
-  async function nextTurn() {
+  function nextTurn() {
     completedRef.current.add(cursor); // this turn is scored & banked (reversible via back-nav)
     const next = cursor + 1;
     if (next >= total) {
-      await persistTurn({ gameId: p.gameId, cursor, finished: true });
       setPhase("over");
+      void persistTurn({ gameId: p.gameId, cursor, finished: true }); // persist in background
       return;
     }
+    // Advance the UI immediately; persist the cursor in the background so the
+    // click feels instant (the cursor is also recoverable from game events).
     furthestRef.current = Math.max(furthestRef.current, next);
-    await persistTurn({ gameId: p.gameId, cursor: next });
     setCursor(next);
     setCurrentTrivia(null);
     setFeudRes(null);
@@ -403,6 +404,7 @@ export function LiveGame(p: LiveGamePayload) {
     setGuessBase(null);
     setTriviaRes(null);
     setPhase("intro");
+    void persistTurn({ gameId: p.gameId, cursor: next });
   }
 
   async function togglePause() {

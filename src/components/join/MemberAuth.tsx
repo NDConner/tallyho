@@ -4,15 +4,14 @@ import { useState, type FormEvent } from "react";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 
 /**
- * Member sign-in for the join flow. Two ways in — a magic email link (no
- * password) or email + password — both land them back in the join flow with a
- * session so they can claim their roster slot. Pure client-side so it stays
- * inside the multi-step flow without a redirect (except the magic-link round
- * trip, which returns via /auth/confirm).
+ * Member sign-in for the join flow. Primary path: email + password, one button —
+ * it signs you in, or (new players) creates your account instantly via
+ * /api/auth/register and signs you in, with no email round-trip. A magic-email
+ * link is offered as a fallback. Either way you land back here with a session to
+ * claim your roster slot.
  */
 export function MemberAuth({ code, onAuthed }: { code: string; onAuthed: (email: string) => void }) {
-  const [mode, setMode] = useState<"link" | "password">("link");
-  const [isSignup, setIsSignup] = useState(false);
+  const [mode, setMode] = useState<"password" | "link">("password");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
@@ -20,6 +19,45 @@ export function MemberAuth({ code, onAuthed }: { code: string; onAuthed: (email:
   const [err, setErr] = useState<string | null>(null);
 
   const supabase = createSupabaseBrowserClient();
+
+  async function handlePassword(e: FormEvent) {
+    e.preventDefault();
+    const em = email.trim();
+    if (!em || password.length < 6) {
+      setErr("Enter your email and a password of at least 6 characters.");
+      return;
+    }
+    setBusy(true);
+    setErr(null);
+    setMsg(null);
+    try {
+      // 1) Try signing in (returning players).
+      const first = await supabase.auth.signInWithPassword({ email: em, password });
+      if (!first.error && first.data.user) return onAuthed(first.data.user.email ?? em);
+
+      // 2) Not a sign-in — create a confirmed account (new players), then sign in.
+      const reg = await fetch("/api/auth/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: em, password, code }),
+      })
+        .then((r) => r.json())
+        .catch(() => ({ ok: false, error: "Network error — try again." }));
+
+      if (reg.ok && reg.created) {
+        const second = await supabase.auth.signInWithPassword({ email: em, password });
+        if (!second.error && second.data.user) return onAuthed(second.data.user.email ?? em);
+        setErr(second.error?.message ?? "Account created — try signing in again.");
+      } else if (reg.ok && !reg.created) {
+        setErr("That email already has an account — check your password, or use the email link below.");
+      } else {
+        setErr(reg.error ?? "Couldn't sign you in.");
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const redirectTo =
     typeof window !== "undefined"
       ? `${window.location.origin}/auth/confirm?next=${encodeURIComponent(`/join?code=${code}`)}`
@@ -27,45 +65,21 @@ export function MemberAuth({ code, onAuthed }: { code: string; onAuthed: (email:
 
   async function sendLink(e: FormEvent) {
     e.preventDefault();
-    if (!email.trim()) return setErr("Enter your email.");
+    const em = email.trim();
+    if (!em) {
+      setErr("Enter your email.");
+      return;
+    }
     setBusy(true);
     setErr(null);
     setMsg(null);
     const { error } = await supabase.auth.signInWithOtp({
-      email: email.trim(),
+      email: em,
       options: { emailRedirectTo: redirectTo, shouldCreateUser: true },
     });
     setBusy(false);
     if (error) setErr(error.message);
-    else setMsg(`Check ${email.trim()} for a sign-in link — open it and you'll come right back here.`);
-  }
-
-  async function withPassword(e: FormEvent) {
-    e.preventDefault();
-    if (!email.trim() || password.length < 6)
-      return setErr("Enter your email and a password of at least 6 characters.");
-    setBusy(true);
-    setErr(null);
-    setMsg(null);
-    try {
-      if (isSignup) {
-        const { data, error } = await supabase.auth.signUp({
-          email: email.trim(),
-          password,
-          options: { emailRedirectTo: redirectTo },
-        });
-        if (error) return setErr(error.message);
-        if (!data.session)
-          return setMsg("Account created — check your email to confirm, then come back and sign in.");
-        onAuthed(data.user?.email ?? email.trim());
-      } else {
-        const { data, error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
-        if (error) return setErr(error.message);
-        onAuthed(data.user?.email ?? email.trim());
-      }
-    } finally {
-      setBusy(false);
-    }
+    else setMsg(`Check ${em} for a sign-in link — open it and you'll come right back here.`);
   }
 
   return (
@@ -74,28 +88,6 @@ export function MemberAuth({ code, onAuthed }: { code: string; onAuthed: (email:
       <p className="mt-1 text-center text-sm text-cream/60">
         So only you can see and edit your answers — and you&apos;ll keep your history across games.
       </p>
-
-      <div className="mt-4 flex justify-center gap-1.5">
-        {(["link", "password"] as const).map((m) => (
-          <button
-            key={m}
-            type="button"
-            onClick={() => {
-              setMode(m);
-              setErr(null);
-              setMsg(null);
-            }}
-            className={
-              "rounded-full border px-3 py-1.5 text-xs font-semibold transition " +
-              (mode === m
-                ? "border-magenta bg-magenta/20 text-cream"
-                : "border-white/15 bg-white/5 text-cream/70 hover:border-cyan hover:text-cream")
-            }
-          >
-            {m === "link" ? "✉️ Email me a link" : "🔑 Use a password"}
-          </button>
-        ))}
-      </div>
 
       {err && (
         <p className="mt-3 rounded-lg border border-magenta/30 bg-magenta/10 px-3 py-2 text-center text-sm text-magenta-soft">
@@ -108,7 +100,44 @@ export function MemberAuth({ code, onAuthed }: { code: string; onAuthed: (email:
         </p>
       )}
 
-      {mode === "link" ? (
+      {mode === "password" ? (
+        <form onSubmit={handlePassword} className="mt-4 space-y-3">
+          <input
+            type="email"
+            autoComplete="email"
+            inputMode="email"
+            placeholder="you@example.com"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            className="input"
+          />
+          <input
+            type="password"
+            autoComplete="current-password"
+            placeholder="Choose a password (6+ characters)"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            className="input"
+          />
+          <button type="submit" disabled={busy} className="btn btn-primary w-full">
+            {busy ? "…" : "Continue →"}
+          </button>
+          <p className="text-center text-xs text-cream/45">
+            New here? We&apos;ll create your account automatically — no email to confirm.
+          </p>
+          <button
+            type="button"
+            onClick={() => {
+              setMode("link");
+              setErr(null);
+              setMsg(null);
+            }}
+            className="w-full text-center text-xs text-cream/55 underline hover:text-cream"
+          >
+            Prefer an email link instead?
+          </button>
+        </form>
+      ) : (
         <form onSubmit={sendLink} className="mt-4 space-y-3">
           <input
             type="email"
@@ -122,40 +151,16 @@ export function MemberAuth({ code, onAuthed }: { code: string; onAuthed: (email:
           <button type="submit" disabled={busy} className="btn btn-primary w-full">
             {busy ? "Sending…" : "Send me a sign-in link →"}
           </button>
-          <p className="text-center text-xs text-cream/45">No password to remember — we email you a link.</p>
-        </form>
-      ) : (
-        <form onSubmit={withPassword} className="mt-4 space-y-3">
-          <input
-            type="email"
-            autoComplete="email"
-            inputMode="email"
-            placeholder="you@example.com"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            className="input"
-          />
-          <input
-            type="password"
-            autoComplete={isSignup ? "new-password" : "current-password"}
-            placeholder="Password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            className="input"
-          />
-          <button type="submit" disabled={busy} className="btn btn-primary w-full">
-            {busy ? "…" : isSignup ? "Create account →" : "Sign in →"}
-          </button>
           <button
             type="button"
             onClick={() => {
-              setIsSignup((s) => !s);
+              setMode("password");
               setErr(null);
               setMsg(null);
             }}
             className="w-full text-center text-xs text-cream/55 underline hover:text-cream"
           >
-            {isSignup ? "Already have an account? Sign in" : "New here? Create an account"}
+            Use a password instead (instant)
           </button>
         </form>
       )}

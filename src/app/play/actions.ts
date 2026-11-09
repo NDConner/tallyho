@@ -617,7 +617,7 @@ export async function startTriviaOnlyGame(formData: FormData) {
   } = await supabase.auth.getUser();
   if (!user) redirect("/login");
 
-  const [{ data: teamData }, { data: memberData }] = await Promise.all([
+  const [{ data: teamData }, { data: memberData }, { data: groupData }] = await Promise.all([
     supabase.from("teams").select("id, name, team_index").eq("group_id", groupId).order("team_index"),
     supabase
       .from("members")
@@ -625,9 +625,11 @@ export async function startTriviaOnlyGame(formData: FormData) {
       .eq("group_id", groupId)
       .eq("is_playing", true)
       .order("created_at"),
+    supabase.from("groups").select("*").eq("id", groupId).maybeSingle(),
   ]);
   const teams = (teamData ?? []) as { id: string; name: string; team_index: number }[];
   const members = (memberData ?? []) as { id: string; display_name: string; team_id: string }[];
+  const stealsEnabled = Boolean((groupData as { steals_enabled?: boolean } | null)?.steals_enabled);
   if (teams.length === 0) redirect(`/dashboard/g/${groupId}`);
 
   // Completely random: shuffle the whole curated pool and take a generous slice.
@@ -676,7 +678,7 @@ export async function startTriviaOnlyGame(formData: FormData) {
       current_member_id: queue[0].memberId || null,
       current_phase: "feud",
       settings,
-      state: { queue, cursor: 0, triviaOnly: true, winTarget, triviaPool: pool },
+      state: { queue, cursor: 0, triviaOnly: true, winTarget, triviaPool: pool, stealsEnabled },
       started_at: new Date().toISOString(),
     })
     .select("id")

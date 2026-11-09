@@ -114,6 +114,24 @@ export async function setCaptain(input: { groupId: string; memberId: string }) {
   revalidatePath(`/dashboard/g/${input.groupId}`);
 }
 
+/** Rename a player (the host-controlled in-group name). Members can't change this
+ *  themselves — it's the name their account shows under in this game. */
+export async function renameMember(input: { groupId: string; memberId: string; name: string }) {
+  const name = input.name.trim().slice(0, 40);
+  if (!input.groupId || !input.memberId || !name) return;
+  const supabase = await createSupabaseServerClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return;
+  await supabase
+    .from("members")
+    .update({ display_name: name })
+    .eq("id", input.memberId)
+    .eq("group_id", input.groupId);
+  revalidatePath(`/dashboard/g/${input.groupId}`);
+}
+
 /** Rename a group. */
 export async function renameGroup(formData: FormData) {
   const groupId = String(formData.get("groupId") || "");
@@ -404,7 +422,11 @@ export async function setGameFormat(input: {
     data: { user },
   } = await supabase.auth.getUser();
   if (!user) return { ok: false, error: "Sign in first." };
-  const feudRatio = Math.max(1, Math.min(100, Math.round(input.feudRatio || 50)));
+  // 0 = trivia only, 100 = feud only; don't let `|| 50` swallow a real 0.
+  const feudRatio = Math.max(
+    0,
+    Math.min(100, Math.round(Number.isFinite(input.feudRatio) ? input.feudRatio : 50)),
+  );
   const triviaPicker = input.triviaPicker === "host" ? "host" : "captains";
   const { error } = await supabase
     .from("groups")

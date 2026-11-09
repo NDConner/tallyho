@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { setGameFormat } from "@/app/dashboard/g/[id]/actions";
 
 const BLENDS = [
+  { ratio: 0, label: "Trivia only", hint: "No feud — random trivia to a target score" },
   { ratio: 50, label: "Even", hint: "Feud & trivia, 1:1" },
   { ratio: 67, label: "More feud", hint: "Trivia every other turn" },
   { ratio: 75, label: "Mostly feud", hint: "Trivia ~every 3rd turn" },
@@ -32,6 +33,8 @@ export function GameFormatEditor({
   const [steals, setSteals] = useState(initial.stealsEnabled);
 
   const feudOnly = ratio >= 100;
+  const triviaOnly = ratio === 0;
+  const noTopics = feudOnly || triviaOnly; // neither extreme uses captain topic picks
   const dirty = () => setSaved(false);
 
   function save() {
@@ -69,12 +72,12 @@ export function GameFormatEditor({
         </div>
         <p className="mt-1.5 text-xs text-cream/45">
           {BLENDS.find((b) => b.ratio === ratio)?.hint}
-          {!feudOnly && " · trivia questions come from your bank"}
+          {!noTopics && " · trivia comes from your bank"}
         </p>
       </div>
 
       {/* who picks trivia topics */}
-      {!feudOnly && (
+      {!noTopics && (
         <div>
           <div className="label mb-1.5">Who picks trivia topics?</div>
           <div className="flex flex-wrap gap-1.5">
