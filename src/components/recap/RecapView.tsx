@@ -2,10 +2,25 @@
 
 import { useState } from "react";
 import { cn } from "@/lib/utils";
-import type { Recap, RecapAvatar } from "@/lib/recap";
+import type { Recap, RecapAvatar, HostAnalytics, AnalyticsQuestion, AnalyticsPerson } from "@/lib/recap";
 
 const TEAM_BG = ["bg-magenta", "bg-cyan", "bg-gold", "bg-green"];
-type View = "overview" | "superlatives" | "players" | "tallies";
+type View = "overview" | "superlatives" | "players" | "tallies" | "questions" | "people";
+
+function typeLabel(t: string): string {
+  return (
+    (
+      {
+        pick_person: "who's most likely",
+        likelihood: "likelihood",
+        multiple_choice: "multiple choice",
+        open_text: "open answer",
+        guess_who: "whose answer",
+        guess_what: "guess the answer",
+      } as Record<string, string>
+    )[t] ?? t
+  );
+}
 
 function Avatar({ a, size = 44 }: { a: RecapAvatar; size?: number }) {
   return (
@@ -32,7 +47,7 @@ function Stat({ label, value }: { label: string; value: number }) {
   );
 }
 
-export function RecapView({ recap }: { recap: Recap }) {
+export function RecapView({ recap, analytics }: { recap: Recap; analytics?: HostAnalytics | null }) {
   const [view, setView] = useState<View>("overview");
   const [copied, setCopied] = useState(false);
 
@@ -58,6 +73,12 @@ export function RecapView({ recap }: { recap: Recap }) {
     ["superlatives", "Superlatives"],
     ["players", "Player cards"],
     ["tallies", "Tallies"],
+    ...((analytics
+      ? [
+          ["questions", "🔒 Questions"],
+          ["people", "🔒 People"],
+        ]
+      : []) as [View, string][]),
   ];
 
   return (
@@ -237,10 +258,223 @@ export function RecapView({ recap }: { recap: Recap }) {
         </section>
       )}
 
+      {/* host-only: every question + who answered what */}
+      {view === "questions" && analytics && <QuestionsPanel analytics={analytics} />}
+
+      {/* host-only: per-person answer sheet + who named them */}
+      {view === "people" && analytics && <PeoplePanel analytics={analytics} />}
+
       <div className="mt-10 text-center text-xs text-cream/40">
         Made with <span className="font-display font-bold text-cream/70">Tallyho</span>
         {recap.aiUsed ? " · personas written by AI" : ""}
       </div>
     </main>
+  );
+}
+
+function HostBanner() {
+  return (
+    <div className="mb-4 rounded-xl border border-gold/30 bg-gold/5 px-3 py-2 text-xs text-gold">
+      🔒 Host-only — raw responses and votes. These are <span className="font-semibold">not</span> on the public
+      recap link; only you (the group owner) see this.
+    </div>
+  );
+}
+
+function QuestionsPanel({ analytics }: { analytics: HostAnalytics }) {
+  const [filter, setFilter] = useState("");
+  const f = filter.trim().toLowerCase();
+  const qs = f ? analytics.questions.filter((q) => q.prompt.toLowerCase().includes(f)) : analytics.questions;
+  return (
+    <section className="mt-6">
+      <HostBanner />
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h2 className="font-display text-xl font-black">📋 Every question &amp; answer</h2>
+        <input
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          placeholder="Filter questions…"
+          className="input w-full max-w-[12rem] text-sm"
+        />
+      </div>
+      <p className="mt-1 text-sm text-cream/55">
+        {analytics.questions.length} questions · {analytics.totalResponses} responses. Tap any question to see
+        exactly who answered what.
+      </p>
+      <div className="mt-3 space-y-2">
+        {qs.map((q) => (
+          <QuestionRow key={q.id} q={q} />
+        ))}
+        {qs.length === 0 && <p className="text-sm text-cream/50">No questions match &ldquo;{filter}&rdquo;.</p>}
+      </div>
+    </section>
+  );
+}
+
+function QuestionRow({ q }: { q: AnalyticsQuestion }) {
+  const maxCount = Math.max(1, ...q.buckets.map((b) => b.count));
+  const showTally = q.buckets.length > 1 && q.type !== "open_text";
+  return (
+    <details className="card p-0 [&_summary::-webkit-details-marker]:hidden">
+      <summary className="flex cursor-pointer list-none items-start justify-between gap-3 p-4">
+        <span className="min-w-0">
+          <span className="chip mr-2 inline-block cursor-pointer text-[0.6rem] uppercase tracking-wide">
+            {typeLabel(q.type)}
+          </span>
+          <span className="font-semibold">{q.prompt}</span>
+        </span>
+        <span className="chip shrink-0 cursor-pointer whitespace-nowrap text-xs">👁 {q.responseCount}</span>
+      </summary>
+      <div className="border-t border-white/8 p-4 pt-3">
+        {showTally && (
+          <div className="mb-3 space-y-1.5">
+            {q.buckets.slice(0, 8).map((b) => (
+              <div key={b.label} className="flex items-center gap-2 text-sm">
+                <span className="w-28 shrink-0 truncate text-cream/70">{b.label}</span>
+                <div className="h-2 flex-1 overflow-hidden rounded-full bg-white/10">
+                  <div className="h-full rounded-full bg-cyan" style={{ width: `${(b.count / maxCount) * 100}%` }} />
+                </div>
+                <span className="w-6 text-right font-display font-black text-cream/70">{b.count}</span>
+              </div>
+            ))}
+          </div>
+        )}
+        <ul className="space-y-1.5 text-sm">
+          {q.responses.map((r, i) => (
+            <li key={i} className="flex items-baseline justify-between gap-3">
+              <span className="shrink-0 text-cream/55">
+                {r.name}
+                {r.teamName ? <span className="text-cream/35"> · {r.teamName}</span> : ""}
+              </span>
+              <span className="min-w-0 text-right font-medium">
+                {r.answer || <span className="text-cream/30">—</span>}
+                {r.matched && r.matched.toLowerCase() !== r.answer.trim().toLowerCase() && (
+                  <span className="text-cream/40"> → {r.matched}</span>
+                )}
+              </span>
+            </li>
+          ))}
+          {q.responses.length === 0 && <li className="text-cream/40">No one answered this.</li>}
+        </ul>
+        {q.results.length > 0 && (
+          <div className="mt-3 border-t border-white/8 pt-2">
+            <div className="label mb-1">Played live</div>
+            {q.results.map((res, i) => (
+              <div key={i} className="flex items-center justify-between gap-2 text-sm">
+                <span className="min-w-0 truncate text-cream/55">
+                  {res.correct ? "✅" : "❌"} {res.teamName}
+                  {res.memberName ? ` · ${res.memberName}` : ""}
+                </span>
+                <span className="shrink-0">
+                  &ldquo;{res.guess || "—"}&rdquo; <span className="font-display font-black text-gold">+{res.points}</span>
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </details>
+  );
+}
+
+function PeoplePanel({ analytics }: { analytics: HostAnalytics }) {
+  const people = analytics.people;
+  const [selId, setSelId] = useState(people[0]?.memberId ?? "");
+  const sel = people.find((p) => p.memberId === selId) ?? people[0];
+  return (
+    <section className="mt-6">
+      <HostBanner />
+      <h2 className="font-display text-xl font-black">🧑 By person</h2>
+      <p className="mt-1 text-sm text-cream/55">
+        Pick anyone to see their full answer sheet, who named them, and how they played.
+      </p>
+      <div className="mt-3 flex flex-wrap gap-1.5">
+        {people.map((p) => (
+          <button
+            key={p.memberId}
+            onClick={() => setSelId(p.memberId)}
+            className={cn(
+              "rounded-full border px-3 py-1.5 text-xs font-semibold transition",
+              p.memberId === selId
+                ? "border-magenta bg-magenta/20 text-cream"
+                : "border-white/15 bg-white/5 text-cream/70 hover:border-cyan hover:text-cream",
+            )}
+          >
+            {p.name}
+          </button>
+        ))}
+      </div>
+      {sel && <PersonDetail p={sel} />}
+    </section>
+  );
+}
+
+function PersonDetail({ p }: { p: AnalyticsPerson }) {
+  return (
+    <div className="mt-4 space-y-4">
+      <div className="card flex items-center gap-3 p-4">
+        <Avatar a={p.avatar} size={44} />
+        <div className="min-w-0">
+          <div className="truncate font-display text-lg font-black">{p.name}</div>
+          <div className="truncate text-xs text-cyan">
+            {p.teamName ?? "No team"}
+            {p.isPlaying ? "" : " · answer-only"}
+          </div>
+        </div>
+        <div className="ml-auto shrink-0 text-right">
+          <div className="font-display text-2xl font-black text-gold">{p.votesReceived}</div>
+          <div className="label">votes received</div>
+        </div>
+      </div>
+
+      <div className="card p-4">
+        <h3 className="font-display font-bold">Their answers ({p.answers.length})</h3>
+        <ul className="mt-2 space-y-2 text-sm">
+          {p.answers.map((a, i) => (
+            <li key={i} className="border-t border-white/8 pt-2 first:border-0 first:pt-0">
+              <div className="text-xs text-cream/50">
+                <span className="mr-1 uppercase tracking-wide text-cream/35">[{typeLabel(a.type)}]</span>
+                {a.prompt}
+              </div>
+              <div className="font-medium">{a.answer || <span className="text-cream/30">—</span>}</div>
+            </li>
+          ))}
+          {p.answers.length === 0 && <li className="text-cream/40">Didn&apos;t answer any questions.</li>}
+        </ul>
+      </div>
+
+      {p.namedBy.length > 0 && (
+        <div className="card p-4">
+          <h3 className="font-display font-bold">Named by ({p.namedBy.length})</h3>
+          <p className="mb-2 text-xs text-cream/50">Who put {p.name} as their answer on a &ldquo;most likely&rdquo; question.</p>
+          <ul className="space-y-1 text-sm">
+            {p.namedBy.map((n, i) => (
+              <li key={i} className="flex items-baseline justify-between gap-3">
+                <span className="shrink-0 font-medium">{n.voter}</span>
+                <span className="min-w-0 text-right text-xs text-cream/55">{n.question}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {p.liveTurns.length > 0 && (
+        <div className="card p-4">
+          <h3 className="font-display font-bold">Turns they played ({p.liveTurns.length})</h3>
+          <ul className="mt-2 space-y-1 text-sm">
+            {p.liveTurns.map((t, i) => (
+              <li key={i} className="flex items-center justify-between gap-2">
+                <span className="min-w-0 truncate text-cream/60">
+                  {t.correct ? "✅" : "❌"} {t.prompt}
+                </span>
+                <span className="shrink-0">
+                  &ldquo;{t.guess || "—"}&rdquo; <span className="font-display font-black text-gold">+{t.points}</span>
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
   );
 }

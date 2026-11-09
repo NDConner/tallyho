@@ -1,6 +1,8 @@
 import { notFound } from "next/navigation";
 import type { Metadata } from "next";
-import { getOrBuildRecap } from "@/lib/recap";
+import { getOrBuildRecap, buildHostAnalytics, type HostAnalytics } from "@/lib/recap";
+import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { RecapView } from "@/components/recap/RecapView";
 
 // Public, shareable page. Built lazily + cached on first view (see getOrBuildRecap).
@@ -25,5 +27,33 @@ export default async function RecapPage({ params }: { params: Promise<{ gameId: 
   const { gameId } = await params;
   const recap = await getOrBuildRecap(gameId);
   if (!recap) notFound();
-  return <RecapView recap={recap} />;
+
+  // Deep analytics (raw responses + who voted for what) are HOST-ONLY: built and
+  // sent to the client only when the signed-in viewer owns this game's group, so
+  // the public recap link never leaks anyone's answers.
+  let analytics: HostAnalytics | null = null;
+  try {
+    const supabase = await createSupabaseServerClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (user) {
+      const admin = createSupabaseAdminClient();
+      const { data: game } = await admin.from("games").select("group_id").eq("id", gameId).maybeSingle();
+      if (game) {
+        const { data: group } = await admin
+          .from("groups")
+          .select("created_by")
+          .eq("id", game.group_id as string)
+          .maybeSingle();
+        if (group && group.created_by === user.id) {
+          analytics = await buildHostAnalytics(gameId);
+        }
+      }
+    }
+  } catch {
+    /* never block the public recap on the analytics path */
+  }
+
+  return <RecapView recap={recap} analytics={analytics} />;
 }

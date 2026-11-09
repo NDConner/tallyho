@@ -76,6 +76,50 @@ export interface Recap {
   aiUsed: boolean;
 }
 
+// ---- Host-only analytics (never put on the public recap payload) -----------
+export interface AnalyticsResponse {
+  memberId: string;
+  name: string;
+  teamName: string | null;
+  answer: string;
+  matched: string | null; // for pick-a-person: which member this answer named
+}
+export interface AnalyticsResult {
+  teamName: string;
+  memberName: string | null;
+  guess: string;
+  correct: boolean;
+  points: number;
+  kind: string;
+}
+export interface AnalyticsQuestion {
+  id: string;
+  prompt: string;
+  type: string;
+  options: string[] | null;
+  responseCount: number;
+  responses: AnalyticsResponse[];
+  buckets: { label: string; count: number }[];
+  results: AnalyticsResult[];
+}
+export interface AnalyticsPerson {
+  memberId: string;
+  name: string;
+  teamName: string | null;
+  isPlaying: boolean;
+  avatar: RecapAvatar;
+  answers: { questionId: string; prompt: string; type: string; answer: string }[];
+  votesReceived: number;
+  namedBy: { voter: string; question: string }[];
+  liveTurns: { prompt: string; kind: string; guess: string; correct: boolean; points: number }[];
+}
+export interface HostAnalytics {
+  questions: AnalyticsQuestion[];
+  people: AnalyticsPerson[];
+  pickPersonCount: number;
+  totalResponses: number;
+}
+
 function hashStr(s: string): number {
   let h = 0;
   for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
@@ -418,4 +462,147 @@ function mostCommon(values: string[]): string | null {
   let best: { label: string; n: number } | null = null;
   for (const [, c] of counts) if (c.n >= 2 && (!best || c.n > best.n)) best = c;
   return best?.label ?? null;
+}
+
+/**
+ * Deep, host-only analytics for a game: every question with who answered what
+ * (and the live result), and every person with their full answer sheet, who
+ * named them, and the turns they played. Built with the service role, so the
+ * caller MUST confirm the viewer owns the group before calling this — it is
+ * never attached to the public recap payload.
+ */
+export async function buildHostAnalytics(gameId: string): Promise<HostAnalytics | null> {
+  const supabase = createSupabaseAdminClient();
+  const { data: game } = await supabase.from("games").select("id, group_id").eq("id", gameId).maybeSingle();
+  if (!game) return null;
+  const groupId = game.group_id as string;
+
+  const [{ data: teamRows }, { data: memberRows }, { data: questionRows }, { data: events }] = await Promise.all([
+    supabase.from("teams").select("id, name, team_index").eq("group_id", groupId).order("team_index"),
+    supabase.from("members").select("id, display_name, team_id, is_playing").eq("group_id", groupId).order("created_at"),
+    supabase.from("feud_questions").select("id, prompt, type, options, is_buffer").eq("group_id", groupId).order("created_at"),
+    supabase.from("game_events").select("type, payload").eq("game_id", gameId).order("created_at"),
+  ]);
+  const teams = (teamRows ?? []) as Row[];
+  const members = (memberRows ?? []) as Row[];
+  const questions = ((questionRows ?? []) as Row[]).filter((q) => !q.is_buffer);
+  const qIds = questions.map((q) => q.id as string);
+  const { data: respRows } = qIds.length
+    ? await supabase.from("feud_responses").select("question_id, member_id, raw_answer").in("question_id", qIds)
+    : { data: [] as Row[] };
+  const responses = (respRows ?? []) as Row[];
+
+  const nameById = new Map(members.map((m) => [m.id as string, m.display_name as string]));
+  const teamNameByMember = new Map(
+    members.map((m) => [m.id as string, m.team_id ? ((teams.find((t) => t.id === m.team_id)?.name as string) ?? null) : null]),
+  );
+  const allNames = members.map((m) => m.display_name as string);
+  const promptById = new Map(questions.map((q) => [q.id as string, q.prompt as string]));
+
+  // Responses grouped by question and by member.
+  const respByQ = new Map<string, Row[]>();
+  const respByMember = new Map<string, Row[]>();
+  for (const r of responses) {
+    const qid = r.question_id as string;
+    const mid = r.member_id as string;
+    (respByQ.get(qid) ?? respByQ.set(qid, []).get(qid)!).push(r);
+    (respByMember.get(mid) ?? respByMember.set(mid, []).get(mid)!).push(r);
+  }
+
+  // Live results grouped by question id (from enriched game_events).
+  const RESULT_TYPES = new Set(["feud_result", "guess_who_result", "guess_what_result", "trivia_result"]);
+  const resultsByQ = new Map<string, AnalyticsResult[]>();
+  const turnsByMember = new Map<string, AnalyticsPerson["liveTurns"]>();
+  const teamNameById = new Map(teams.map((t) => [t.id as string, t.name as string]));
+  for (const e of events ?? []) {
+    if (!RESULT_TYPES.has(e.type as string)) continue;
+    const p = (e.payload ?? {}) as Row;
+    const qid = (p.questionId as string) ?? "";
+    const kind = (p.kind as string) ?? (e.type === "trivia_result" ? "trivia" : "feud");
+    const guess = (p.guess as string) ?? (p.answer as string) ?? "";
+    const correct = Boolean(p.correct) || Number(p.points ?? 0) > 0;
+    const points = Number(p.points ?? 0);
+    const memberName = (p.memberName as string) ?? (p.memberId ? nameById.get(p.memberId as string) ?? null : null);
+    const teamName = p.teamId ? teamNameById.get(p.teamId as string) ?? "" : "";
+    const res: AnalyticsResult = { teamName, memberName, guess, correct, points, kind };
+    if (qid) (resultsByQ.get(qid) ?? resultsByQ.set(qid, []).get(qid)!).push(res);
+    const mid = p.memberId as string | undefined;
+    if (mid) {
+      const prompt = promptById.get(qid) ?? (p.topic ? `Trivia · ${p.topic}` : "Trivia");
+      (turnsByMember.get(mid) ?? turnsByMember.set(mid, []).get(mid)!).push({ prompt, kind, guess, correct, points });
+    }
+  }
+
+  // Who each pick-a-person answer named (for votes + "named by").
+  const namedByMember = new Map<string, AnalyticsPerson["namedBy"]>();
+  const votesByMember = new Map<string, number>();
+  const nameToId = new Map(members.map((m) => [m.display_name as string, m.id as string]));
+  const matchOf = (answer: string): string | null => fuzzyMatch(answer, allNames);
+
+  const analyticsQuestions: AnalyticsQuestion[] = questions.map((q) => {
+    const qid = q.id as string;
+    const type = q.type as string;
+    const rs = respByQ.get(qid) ?? [];
+    const responsesOut: AnalyticsResponse[] = rs.map((r) => {
+      const answer = (r.raw_answer as string) ?? "";
+      const matched = type === "pick_person" ? matchOf(answer) : null;
+      if (type === "pick_person" && matched) {
+        const targetId = nameToId.get(matched);
+        if (targetId) {
+          votesByMember.set(targetId, (votesByMember.get(targetId) ?? 0) + 1);
+          (namedByMember.get(targetId) ?? namedByMember.set(targetId, []).get(targetId)!).push({
+            voter: nameById.get(r.member_id as string) ?? "Someone",
+            question: q.prompt as string,
+          });
+        }
+      }
+      return {
+        memberId: r.member_id as string,
+        name: nameById.get(r.member_id as string) ?? "Someone",
+        teamName: teamNameByMember.get(r.member_id as string) ?? null,
+        answer,
+        matched,
+      };
+    });
+    const buckets = tallyBuckets(rs.map((r) => (r.raw_answer as string) ?? "")).map((b) => ({ label: b.label, count: b.count }));
+    return {
+      id: qid,
+      prompt: q.prompt as string,
+      type,
+      options: (q.options as string[] | null) ?? null,
+      responseCount: responsesOut.length,
+      responses: responsesOut,
+      buckets,
+      results: resultsByQ.get(qid) ?? [],
+    };
+  });
+
+  const people: AnalyticsPerson[] = members.map((m) => {
+    const id = m.id as string;
+    const name = m.display_name as string;
+    const mine = respByMember.get(id) ?? [];
+    return {
+      memberId: id,
+      name,
+      teamName: teamNameByMember.get(id) ?? null,
+      isPlaying: m.is_playing !== false,
+      avatar: avatarFor(name),
+      answers: mine.map((r) => ({
+        questionId: r.question_id as string,
+        prompt: promptById.get(r.question_id as string) ?? "—",
+        type: (questions.find((q) => q.id === r.question_id)?.type as string) ?? "",
+        answer: (r.raw_answer as string) ?? "",
+      })),
+      votesReceived: votesByMember.get(id) ?? 0,
+      namedBy: namedByMember.get(id) ?? [],
+      liveTurns: turnsByMember.get(id) ?? [],
+    };
+  });
+
+  return {
+    questions: analyticsQuestions,
+    people,
+    pickPersonCount: questions.filter((q) => (q.type as string) === "pick_person").length,
+    totalResponses: responses.length,
+  };
 }
