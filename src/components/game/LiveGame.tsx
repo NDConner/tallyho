@@ -17,6 +17,7 @@ import {
   setGameTimers,
   setWinTarget,
   adjustScore,
+  revertTurn,
   startNextRound,
   startTriviaOnlyGame,
   type GameTurn,
@@ -64,6 +65,7 @@ export interface LiveGamePayload {
   usedTriviaIds?: string[]; // trivia already asked (so a resumed game skips them)
   triviaOnly?: boolean; // skip the survey entirely — trivia rounds only
   winTarget?: number | null; // trivia-only: score to play to (default behaviour when null)
+  turnNetSeed?: Record<number, Record<string, number>>; // points each past turn awarded (for back-nav reversal)
 }
 
 type Phase = "preGame" | "intro" | "feud" | "feudReveal" | "triviaIntro" | "trivia" | "triviaReveal" | "over";
@@ -106,6 +108,57 @@ export function LiveGame(p: LiveGamePayload) {
   const [usedTrivia, setUsedTrivia] = useState<Set<string>>(() => new Set(p.usedTriviaIds ?? []));
   const [currentTrivia, setCurrentTrivia] = useState<TriviaQ | null>(null);
 
+  // --- turn ledger: the net points each turn has awarded, so the host can step
+  //     back to a question and we reverse exactly what it scored before re-play.
+  const turnNetRef = useRef<Record<number, Record<string, number>>>({});
+  const completedRef = useRef<Set<number>>(new Set());
+  const furthestRef = useRef<number>(p.cursor);
+  const pickedTriviaRef = useRef<Record<number, TriviaQ>>({});
+  const seededRef = useRef(false);
+  if (!seededRef.current) {
+    seededRef.current = true;
+    for (const [c, m] of Object.entries(p.turnNetSeed ?? {})) {
+      turnNetRef.current[Number(c)] = { ...m };
+      completedRef.current.add(Number(c));
+      furthestRef.current = Math.max(furthestRef.current, Number(c));
+    }
+  }
+
+  const addTurnNet = (c: number, teamId: string, pts: number) => {
+    if (!pts) return;
+    const m = (turnNetRef.current[c] ??= {});
+    m[teamId] = (m[teamId] ?? 0) + pts;
+  };
+  // Re-playing a turn we already scored: undo its points + events first.
+  async function revertIfReplaying(c: number) {
+    if (!completedRef.current.has(c)) return;
+    const net = { ...(turnNetRef.current[c] ?? {}) };
+    setScores((s) => {
+      const ns = { ...s };
+      for (const [tid, pts] of Object.entries(net)) ns[tid] = Math.max(0, (ns[tid] ?? 0) - pts);
+      return ns;
+    });
+    delete turnNetRef.current[c];
+    completedRef.current.delete(c);
+    await revertTurn({ gameId: p.gameId, cursor: c, deltas: net });
+  }
+  // Jump to any turn (back to fix an accidental entry, or forward to a played one).
+  async function goToTurn(target: number) {
+    if (pending || target < 0 || target >= p.queue.length || target === cursor) return;
+    setPaused(false);
+    setGuess("");
+    setAnswer("");
+    setFeudRes(null);
+    setFeudBase(null);
+    setGuessRes(null);
+    setGuessBase(null);
+    setTriviaRes(null);
+    setCurrentTrivia(null);
+    setCursor(target);
+    setPhase(target === 0 ? "preGame" : "intro");
+    await persistTurn({ gameId: p.gameId, cursor: target });
+  }
+
   const turn = p.queue[cursor];
   const total = p.queue.length;
   const teamById = new Map(p.teams.map((t) => [t.id, t]));
@@ -134,7 +187,8 @@ export function LiveGame(p: LiveGamePayload) {
   }, [phase, paused]);
 
   // --- handlers ------------------------------------------------------------
-  function startFeud() {
+  async function startFeud() {
+    await revertIfReplaying(cursor); // re-doing a past turn? wipe its old score first
     setGuess("");
     setFeudRes(null);
     setFeudBase(null);
@@ -148,7 +202,7 @@ export function LiveGame(p: LiveGamePayload) {
     if (pending || phase !== "feud" || !turn) return;
     setPending(true);
     setPhase("feudReveal");
-    const who = { memberId: turn.memberId, memberName: turn.memberName, round: turn.round };
+    const who = { memberId: turn.memberId, memberName: turn.memberName, round: turn.round, cursor };
     try {
       if (turn.kind === "guess_who") {
         const res = await scoreGuessWho({
@@ -162,6 +216,7 @@ export function LiveGame(p: LiveGamePayload) {
         setGuessRes(res);
         setGuessBase(res);
         if (res.points > 0) setScores((s) => ({ ...s, [turn.teamId]: (s[turn.teamId] ?? 0) + res.points }));
+      addTurnNet(cursor, turn.teamId, res.points);
       } else if (turn.kind === "guess_what") {
         const res = await scoreGuessWhat({
           gameId: p.gameId,
@@ -174,6 +229,7 @@ export function LiveGame(p: LiveGamePayload) {
         setGuessRes(res);
         setGuessBase(res);
         if (res.points > 0) setScores((s) => ({ ...s, [turn.teamId]: (s[turn.teamId] ?? 0) + res.points }));
+      addTurnNet(cursor, turn.teamId, res.points);
       } else {
         const res = await scoreFeud({
           gameId: p.gameId,
@@ -185,6 +241,7 @@ export function LiveGame(p: LiveGamePayload) {
         setFeudRes(res);
         setFeudBase(res);
         if (res.points > 0) setScores((s) => ({ ...s, [turn.teamId]: (s[turn.teamId] ?? 0) + res.points }));
+      addTurnNet(cursor, turn.teamId, res.points);
       }
     } finally {
       setPending(false);
@@ -192,16 +249,19 @@ export function LiveGame(p: LiveGamePayload) {
   }
 
   // Pick a trivia question and show the "get ready" transition (category reveal).
-  function continueToTrivia() {
+  async function continueToTrivia() {
     if (!turn) return;
+    await revertIfReplaying(cursor); // trivia-only re-play starts here; feud re-play already reverted
     const bank = p.triviaByTeam[turn.teamId] ?? [];
-    let next = bank.find((q) => !usedTrivia.has(q.id));
+    // Re-use the same question when re-playing a turn, otherwise take the next unused.
+    let next = pickedTriviaRef.current[cursor] ?? bank.find((q) => !usedTrivia.has(q.id));
     if (!next && bank.length > 0) next = bank[Math.floor(Math.random() * bank.length)];
     if (!next) {
       nextTurn();
       return;
     }
-    setUsedTrivia((s) => new Set(s).add(next.id));
+    pickedTriviaRef.current[cursor] = next;
+    setUsedTrivia((s) => new Set(s).add(next!.id));
     setCurrentTrivia(next);
     setAnswer("");
     setTriviaRes(null);
@@ -242,6 +302,7 @@ export function LiveGame(p: LiveGamePayload) {
             answer,
             memberId: turn.memberId,
             memberName: turn.memberName,
+            cursor,
           })
         : await scoreTrivia({
             gameId: p.gameId,
@@ -252,9 +313,11 @@ export function LiveGame(p: LiveGamePayload) {
             memberName: turn.memberName,
             round: turn.round,
             topic: currentTrivia.topic,
+            cursor,
           });
       setTriviaRes(res);
       if (res.points > 0) setScores((s) => ({ ...s, [turn.teamId]: (s[turn.teamId] ?? 0) + res.points }));
+      addTurnNet(cursor, turn.teamId, res.points);
     } finally {
       setPending(false);
     }
@@ -273,12 +336,14 @@ export function LiveGame(p: LiveGamePayload) {
   }
 
   async function nextTurn() {
+    completedRef.current.add(cursor); // this turn is scored & banked (reversible via back-nav)
     const next = cursor + 1;
     if (next >= total) {
       await persistTurn({ gameId: p.gameId, cursor, finished: true });
       setPhase("over");
       return;
     }
+    furthestRef.current = Math.max(furthestRef.current, next);
     await persistTurn({ gameId: p.gameId, cursor: next });
     setCursor(next);
     setCurrentTrivia(null);
@@ -308,6 +373,7 @@ export function LiveGame(p: LiveGamePayload) {
     const delta = awardPoints - feudRes.points;
     setFeudRes({ ...feudRes, matched: bucketLabel, points: awardPoints });
     setScores((s) => ({ ...s, [turn.teamId]: Math.max(0, (s[turn.teamId] ?? 0) + delta) }));
+    addTurnNet(cursor, turn.teamId, delta);
     await adjustScore({ gameId: p.gameId, teamId: turn.teamId, delta });
   }
   // Undo a feud override back to what was auto-scored.
@@ -317,6 +383,7 @@ export function LiveGame(p: LiveGamePayload) {
     setFeudRes(feudBase);
     if (delta !== 0) {
       setScores((s) => ({ ...s, [turn.teamId]: Math.max(0, (s[turn.teamId] ?? 0) + delta) }));
+      addTurnNet(cursor, turn.teamId, delta);
       await adjustScore({ gameId: p.gameId, teamId: turn.teamId, delta });
     }
   }
@@ -332,6 +399,7 @@ export function LiveGame(p: LiveGamePayload) {
     const delta = target - triviaRes.points;
     setTriviaRes({ ...triviaRes, correct: makeCorrect, points: target });
     setScores((s) => ({ ...s, [turn.teamId]: Math.max(0, (s[turn.teamId] ?? 0) + delta) }));
+    addTurnNet(cursor, turn.teamId, delta);
     await adjustScore({ gameId: p.gameId, teamId: turn.teamId, delta });
   }
 
@@ -342,6 +410,7 @@ export function LiveGame(p: LiveGamePayload) {
     const delta = target - guessRes.points;
     setGuessRes({ ...guessRes, correct: makeCorrect, points: target });
     setScores((s) => ({ ...s, [turn.teamId]: Math.max(0, (s[turn.teamId] ?? 0) + delta) }));
+    addTurnNet(cursor, turn.teamId, delta);
     await adjustScore({ gameId: p.gameId, teamId: turn.teamId, delta });
   }
 
@@ -357,8 +426,22 @@ export function LiveGame(p: LiveGamePayload) {
         onSettings={() => setShowSettings((s) => !s)}
         onScores={() => setShowScores((s) => !s)}
         onExit={() => router.push(`/dashboard/g/${p.groupId}`)}
+        onPrev={() => goToTurn(cursor - 1)}
+        onNext={() => goToTurn(cursor + 1)}
+        canPrev={cursor > 0 && phase !== "over"}
+        canNext={cursor < furthestRef.current && phase !== "over"}
         phase={phase}
       />
+
+      {/* re-visiting an earlier, already-played question */}
+      {phase !== "over" && cursor < furthestRef.current && (
+        <div className="mt-2 flex items-center justify-between gap-2 rounded-xl border border-gold/30 bg-gold/5 px-3 py-2 text-xs text-gold">
+          <span>⏮ You stepped back to question {cursor + 1}. Re-playing it replaces its old answer &amp; score.</span>
+          <button onClick={() => goToTurn(furthestRef.current)} className="shrink-0 font-semibold underline hover:text-cream">
+            Back to live (Q{Math.min(furthestRef.current + 1, total)}) →
+          </button>
+        </div>
+      )}
 
       <Scoreboard teams={p.teams} scores={scores} activeTeamId={turn?.teamId} />
 
@@ -688,6 +771,10 @@ function TopBar({
   onSettings,
   onScores,
   onExit,
+  onPrev,
+  onNext,
+  canPrev,
+  canNext,
   phase,
 }: {
   groupName: string;
@@ -698,13 +785,41 @@ function TopBar({
   onSettings: () => void;
   onScores: () => void;
   onExit: () => void;
+  onPrev: () => void;
+  onNext: () => void;
+  canPrev: boolean;
+  canNext: boolean;
   phase: Phase;
 }) {
   return (
     <div className="flex items-center justify-between gap-3 text-sm">
-      <div className="min-w-0 truncate text-cream/60">
-        <span className="font-display font-bold text-cream">{groupName}</span> · Question{" "}
-        {Math.min(cursor + 1, total)}/{total}
+      <div className="flex min-w-0 items-center gap-1.5">
+        {phase !== "over" && (
+          <>
+            <button
+              onClick={onPrev}
+              disabled={!canPrev}
+              title="Previous question (fix an accidental entry)"
+              aria-label="Previous question"
+              className="btn btn-ghost px-2 py-1 text-xs disabled:opacity-30"
+            >
+              ‹
+            </button>
+            <button
+              onClick={onNext}
+              disabled={!canNext}
+              title="Next question"
+              aria-label="Next question"
+              className="btn btn-ghost px-2 py-1 text-xs disabled:opacity-30"
+            >
+              ›
+            </button>
+          </>
+        )}
+        <div className="min-w-0 truncate text-cream/60">
+          <span className="font-display font-bold text-cream">{groupName}</span> · Q{" "}
+          {Math.min(cursor + 1, total)}/{total}
+        </div>
       </div>
       <div className="flex shrink-0 items-center gap-2">
         {phase !== "over" && (

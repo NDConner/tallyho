@@ -122,6 +122,22 @@ export default async function PlayPage({ params }: { params: Promise<{ gameId: s
       .map((t) => t.id);
   }
 
+  // Per-turn net points already awarded, so the host can step back to a turn and
+  // we can subtract exactly what it scored before it's re-played. Rebuilt from
+  // this game's cursor-tagged score events (survives a page reload mid-game).
+  const { data: resultEvents } = await supabase
+    .from("game_events")
+    .select("type, payload")
+    .eq("game_id", gameId)
+    .in("type", ["feud_result", "guess_who_result", "guess_what_result", "trivia_result"]);
+  const turnNetSeed: Record<number, Record<string, number>> = {};
+  for (const e of resultEvents ?? []) {
+    const p = (e.payload ?? {}) as { cursor?: number | null; teamId?: string; points?: number };
+    if (p.cursor == null || !p.teamId) continue;
+    (turnNetSeed[p.cursor] ??= {});
+    turnNetSeed[p.cursor][p.teamId] = (turnNetSeed[p.cursor][p.teamId] ?? 0) + Number(p.points ?? 0);
+  }
+
   const initialScores: Record<string, number> = {};
   for (const t of teams ?? []) initialScores[t.id] = 0;
   for (const s of scoreRows ?? []) initialScores[s.team_id] = s.points;
@@ -159,6 +175,7 @@ export default async function PlayPage({ params }: { params: Promise<{ gameId: s
     usedTriviaIds,
     triviaOnly,
     winTarget: state.winTarget ?? null,
+    turnNetSeed,
   };
 
   return <LiveGame {...payload} />;

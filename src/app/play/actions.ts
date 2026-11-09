@@ -329,6 +329,7 @@ export async function scoreFeud(input: {
   memberId?: string;
   memberName?: string;
   round?: number;
+  cursor?: number;
 }): Promise<FeudResult> {
   const supabase = await createSupabaseServerClient();
   const [{ data: responses }, { data: q }] = await Promise.all([
@@ -362,6 +363,7 @@ export async function scoreFeud(input: {
       memberId: input.memberId ?? null,
       memberName: input.memberName ?? null,
       round: input.round ?? null,
+      cursor: input.cursor ?? null,
     },
   });
 
@@ -379,6 +381,7 @@ export async function scoreTrivia(input: {
   memberName?: string;
   round?: number;
   topic?: string;
+  cursor?: number;
 }): Promise<TriviaResult> {
   const supabase = await createSupabaseServerClient();
   const { data: q } = await supabase.from("trivia_questions").select("*").eq("id", input.questionId).single();
@@ -404,6 +407,7 @@ export async function scoreTrivia(input: {
       memberId: input.memberId ?? null,
       memberName: input.memberName ?? null,
       round: input.round ?? null,
+      cursor: input.cursor ?? null,
     },
   });
 
@@ -420,6 +424,7 @@ export async function scoreGuessWho(input: {
   memberId?: string;
   memberName?: string;
   round?: number;
+  cursor?: number;
 }): Promise<GuessResult> {
   const supabase = await createSupabaseServerClient();
   const { data: author } = await supabase
@@ -447,6 +452,7 @@ export async function scoreGuessWho(input: {
       memberId: input.memberId ?? null,
       memberName: input.memberName ?? null,
       round: input.round ?? null,
+      cursor: input.cursor ?? null,
     },
   });
   return { correct, points, correctLabel: name };
@@ -462,6 +468,7 @@ export async function scoreGuessWhat(input: {
   memberId?: string;
   memberName?: string;
   round?: number;
+  cursor?: number;
 }): Promise<GuessResult> {
   const supabase = await createSupabaseServerClient();
   const { data: resp } = await supabase
@@ -490,6 +497,7 @@ export async function scoreGuessWhat(input: {
       memberId: input.memberId ?? null,
       memberName: input.memberName ?? null,
       round: input.round ?? null,
+      cursor: input.cursor ?? null,
     },
   });
   return { correct, points, correctLabel: answer };
@@ -548,13 +556,14 @@ export async function persistTurn(input: { gameId: string; cursor: number; finis
     return;
   }
   const { data: game } = await supabase.from("games").select("state").eq("id", input.gameId).single();
-  const st = (game?.state as { queue?: GameTurn[]; questionsPerTeam?: number }) ?? {};
+  const st = (game?.state as Record<string, unknown>) ?? {};
   const queue = (st.queue ?? []) as GameTurn[];
   const turn = queue[input.cursor];
   await supabase
     .from("games")
     .update({
-      state: { queue, cursor: input.cursor, questionsPerTeam: st.questionsPerTeam ?? null },
+      // Preserve the whole state (triviaOnly, winTarget, triviaPool, …); only move the cursor.
+      state: { ...st, cursor: input.cursor },
       current_round: turn?.round ?? 1,
       current_team_id: turn?.teamId ?? null,
       current_member_id: turn?.memberId ?? null,
@@ -677,6 +686,7 @@ export async function scoreTriviaFromState(input: {
   answer: string;
   memberId?: string;
   memberName?: string;
+  cursor?: number;
 }): Promise<TriviaResult> {
   const supabase = await createSupabaseServerClient();
   const { data: game } = await supabase.from("games").select("state").eq("id", input.gameId).single();
@@ -703,6 +713,7 @@ export async function scoreTriviaFromState(input: {
       memberId: input.memberId ?? null,
       memberName: input.memberName ?? null,
       round: 1,
+      cursor: input.cursor ?? null,
     },
   });
 
@@ -737,4 +748,34 @@ export async function adjustScore(input: { gameId: string; teamId: string; delta
       .update({ points: Math.max(0, data.points + input.delta) })
       .eq("id", data.id);
   }
+}
+
+/**
+ * Undo a turn's scoring so the host can re-play it (back-navigation after an
+ * accidental key-in). The client passes the exact per-team net that turn awarded
+ * (which already folds in any reveal overrides); we subtract it and delete the
+ * turn's score events (tagged with this cursor), leaving a clean slate.
+ */
+export async function revertTurn(input: { gameId: string; cursor: number; deltas: Record<string, number> }) {
+  const supabase = await createSupabaseServerClient();
+  for (const [teamId, pts] of Object.entries(input.deltas ?? {})) {
+    if (!pts) continue;
+    const { data } = await supabase
+      .from("game_scores")
+      .select("id, points")
+      .eq("game_id", input.gameId)
+      .eq("team_id", teamId)
+      .maybeSingle();
+    if (data) {
+      await supabase
+        .from("game_scores")
+        .update({ points: Math.max(0, data.points - pts) })
+        .eq("id", data.id);
+    }
+  }
+  await supabase
+    .from("game_events")
+    .delete()
+    .eq("game_id", input.gameId)
+    .filter("payload->>cursor", "eq", String(input.cursor));
 }
