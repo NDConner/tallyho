@@ -5,6 +5,7 @@ import { CATEGORY_LABELS } from "@/lib/brand";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { markNotificationsRead } from "./actions";
+import { ProfileForm } from "@/components/ProfileForm";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Your home — Tallyho" };
@@ -39,7 +40,8 @@ export default async function MePage() {
 
   const admin = createSupabaseAdminClient();
 
-  const [{ data: memberRows }, { data: hostedRows }, { data: notifRows }] = await Promise.all([
+  const [{ data: memberRows }, { data: hostedRows }, { data: notifRows }, { data: profileRow }] =
+    await Promise.all([
     admin
       .from("members")
       .select("id, group_id, display_name, is_captain, team_id, claimed_at")
@@ -57,7 +59,10 @@ export default async function MePage() {
       .eq("user_id", user.id)
       .order("created_at", { ascending: false })
       .limit(12),
+    // Defensive: null if the profiles table isn't migrated yet.
+    admin.from("profiles").select("*").eq("user_id", user.id).maybeSingle(),
   ]);
+  const prof = (profileRow ?? null) as Record<string, string | null> | null;
   const members = memberRows ?? [];
   const hosted = hostedRows ?? [];
   const notifications = (notifRows ?? []) as {
@@ -291,6 +296,30 @@ export default async function MePage() {
           </div>
         )}
       </section>
+
+      {/* demographic profile (optional) */}
+      <details className="card mt-8 p-5 [&_summary::-webkit-details-marker]:hidden">
+        <summary className="flex cursor-pointer list-none items-center justify-between gap-2">
+          <h2 className="font-display text-lg font-bold">🧬 Your profile</h2>
+          <span className="chip cursor-pointer text-xs">{prof ? "Edit" : "Add details"}</span>
+        </summary>
+        <p className="mt-1 text-sm text-cream/55">
+          A few optional details about you — used to tailor games and understand the crowd.
+        </p>
+        <div className="mt-4">
+          <ProfileForm
+            initial={{
+              username: prof?.username ?? "",
+              full_name: prof?.full_name ?? "",
+              age_range: prof?.age_range ?? "",
+              gender: prof?.gender ?? "",
+              location: prof?.location ?? "",
+              interests: prof?.interests ?? "",
+              occupation: prof?.occupation ?? "",
+            }}
+          />
+        </div>
+      </details>
     </main>
   );
 }

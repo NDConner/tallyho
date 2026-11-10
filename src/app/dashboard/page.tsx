@@ -3,6 +3,7 @@ import { redirect } from "next/navigation";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { CATEGORY_LABELS } from "@/lib/brand";
 import { getHostAnalytics } from "@/lib/host-analytics";
+import { isAdmin } from "@/lib/admin";
 import { seedDemoGroup } from "./actions";
 
 const STATUS_STYLE: Record<string, string> = {
@@ -41,6 +42,7 @@ export default async function DashboardPage() {
   if (!user) redirect("/login");
 
   const a = await getHostAnalytics(supabase, user.id);
+  const canAdmin = isAdmin(user.email);
 
   return (
     <div>
@@ -53,6 +55,11 @@ export default async function DashboardPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          {canAdmin && (
+            <Link href="/admin" className="btn btn-ghost whitespace-nowrap">
+              🛡️ Admin
+            </Link>
+          )}
           <Link href="/me" className="btn btn-ghost whitespace-nowrap">
             🏠 Your home
           </Link>

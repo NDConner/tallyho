@@ -2,6 +2,7 @@
 
 import { useState, type FormEvent } from "react";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
+import { ProfileForm } from "@/components/ProfileForm";
 
 /**
  * Member sign-in for the join flow. Primary path: email + password, one button —
@@ -17,6 +18,8 @@ export function MemberAuth({ code, onAuthed }: { code: string; onAuthed: (email:
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [collectProfile, setCollectProfile] = useState(false);
+  const [authedEmail, setAuthedEmail] = useState("");
 
   const supabase = createSupabaseBrowserClient();
 
@@ -46,7 +49,12 @@ export function MemberAuth({ code, onAuthed }: { code: string; onAuthed: (email:
 
       if (reg.ok && reg.created) {
         const second = await supabase.auth.signInWithPassword({ email: em, password });
-        if (!second.error && second.data.user) return onAuthed(second.data.user.email ?? em);
+        if (!second.error && second.data.user) {
+          // Brand-new account → collect a quick demographic profile before continuing.
+          setAuthedEmail(second.data.user.email ?? em);
+          setCollectProfile(true);
+          return;
+        }
         setErr(second.error?.message ?? "Account created — try signing in again.");
       } else if (reg.ok && !reg.created) {
         setErr("That email already has an account — check your password, or use the email link below.");
@@ -80,6 +88,25 @@ export function MemberAuth({ code, onAuthed }: { code: string; onAuthed: (email:
     setBusy(false);
     if (error) setErr(error.message);
     else setMsg(`Check ${em} for a sign-in link — open it and you'll come right back here.`);
+  }
+
+  if (collectProfile) {
+    return (
+      <div className="card p-5">
+        <h2 className="text-center font-display text-lg font-bold">You&apos;re in! Tell us a bit about you</h2>
+        <p className="mt-1 text-center text-sm text-cream/60">
+          Optional — takes 20 seconds, and you can edit it anytime on your home page.
+        </p>
+        <div className="mt-4">
+          <ProfileForm
+            onSaved={() => onAuthed(authedEmail)}
+            showSkip
+            onSkip={() => onAuthed(authedEmail)}
+            submitLabel="Save & continue →"
+          />
+        </div>
+      </div>
+    );
   }
 
   return (
